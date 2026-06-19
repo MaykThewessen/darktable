@@ -2661,13 +2661,20 @@ static gboolean _dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
     // Cooldown: skip connect attempts for 2 seconds after a failed connect to
     // avoid a 200ms timeout on every frame when the viewer is not running. The
     // preview pipe runs on a single thread, so no synchronisation is needed.
+    // Connection state for the on-screen cue: -1 unknown, 0 down, 1 up.
     static int64_t _hdr_viewer_next_attempt_us = 0;
+    static int _hdr_viewer_state = -1;
     const int64_t now_us = g_get_monotonic_time();
     if(now_us >= _hdr_viewer_next_attempt_us)
     {
       const int viewer_fd = dt_hdr_viewer_connect();
       if(viewer_fd >= 0)
       {
+        if(_hdr_viewer_state != 1)
+        {
+          dt_control_log(_("HDR preview viewer connected"));
+          _hdr_viewer_state = 1;
+        }
         const size_t w = (size_t)roi_in.width;
         const size_t h = (size_t)roi_in.height;
         const float *const rgba = (const float *const)input;
@@ -2703,6 +2710,11 @@ static gboolean _dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
       {
         // Viewer not reachable -- back off for 2 seconds before retrying.
         _hdr_viewer_next_attempt_us = now_us + 2 * G_USEC_PER_SEC;
+        if(_hdr_viewer_state != 0)
+        {
+          dt_control_log(_("HDR preview viewer not running"));
+          _hdr_viewer_state = 0;
+        }
       }
     }
   }
