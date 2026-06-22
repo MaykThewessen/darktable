@@ -23,6 +23,7 @@
 #include "imageio/imageio_common.h"
 #include "imageio/imageio_module.h"
 #include "imageio/format/imageio_format_api.h"
+#include "imageio/format/hdr_clli_math.h"
 
 #include <glib/gstdio.h>
 #include <inttypes.h>
@@ -116,25 +117,6 @@ void init(dt_imageio_module_format_t *self)
 
 void cleanup(dt_imageio_module_format_t *self)
 {
-}
-
-/*
- * SMPTE ST 2084 (PQ) EOTF: map a normalized PQ-encoded value in [0, 1] to
- * absolute luminance in cd/m^2 (nits), peak white = 10000 nits.
- */
-static float _pq_to_nits(const float e)
-{
-  const float m1 = 0.1593017578125f;   /* 2610 / 16384      */
-  const float m2 = 78.84375f;          /* 2523 / 4096 * 128 */
-  const float c1 = 0.8359375f;         /* 3424 / 4096       */
-  const float c2 = 18.8515625f;        /* 2413 / 4096 * 32  */
-  const float c3 = 18.6875f;           /* 2392 / 4096 * 32  */
-
-  const float ep = powf(CLAMP(e, 0.0f, 1.0f), 1.0f / m2);
-  const float num = fmaxf(ep - c1, 0.0f);
-  const float den = c2 - c3 * ep;
-  if(den <= 0.0f) return 10000.0f;
-  return 10000.0f * powf(num / den, 1.0f / m1);
 }
 
 int write_image(dt_imageio_module_data_t *data,
@@ -357,27 +339,11 @@ int write_image(dt_imageio_module_data_t *data,
   if(!need_to_embed_icc
      && nclx_profile->transfer_characteristics == heif_transfer_characteristic_ITU_R_BT_2100_0_PQ)
   {
-    const size_t npixels = width * height;
-    float max_cll = 0.0f;
-    double sum_fall = 0.0;
-
-    DT_OMP_FOR_SIMD(reduction(max : max_cll) reduction(+ : sum_fall))
-    for(size_t k = 0; k < npixels; k++)
-    {
-      const float *const px = &in_data[4 * k];
-      const float e_max = fmaxf(fmaxf(px[0], px[1]), px[2]);
-      const float nits_raw = _pq_to_nits(e_max);
-      // ignore NaN/Inf samples: they would poison the MaxFALL sum and make the
-      // final 16-bit clli cast undefined.
-      const float nits = isfinite(nits_raw) ? nits_raw : 0.0f;
-      max_cll = fmaxf(max_cll, nits);
-      sum_fall += nits;
-    }
-    const float max_fall = npixels ? (float)(sum_fall / (double)npixels) : 0.0f;
-
+    uint16_t max_cll = 0, max_fall = 0;
+    _hdr_compute_clli(in_data, (size_t)width * height, &max_cll, &max_fall);
     const struct heif_content_light_level cll = {
-      .max_content_light_level     = (uint16_t)CLAMP(roundf(max_cll),  0.0f, 65535.0f),
-      .max_pic_average_light_level = (uint16_t)CLAMP(roundf(max_fall), 0.0f, 65535.0f),
+      .max_content_light_level     = max_cll,
+      .max_pic_average_light_level = max_fall,
     };
     heif_image_set_content_light_level(image, &cll);
 

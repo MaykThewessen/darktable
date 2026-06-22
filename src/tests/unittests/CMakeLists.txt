@@ -1,4 +1,5 @@
 add_subdirectory(iop)
+add_subdirectory(hdr)
 
 if(USE_AI)
   add_subdirectory(ai)
