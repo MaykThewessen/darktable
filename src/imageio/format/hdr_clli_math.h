@@ -63,7 +63,10 @@ static inline void _hdr_compute_clli(const float *const rgba,
   double sum_fall = 0.0;
 
 #ifdef _OPENMP
-#pragma omp parallel for simd \
+// No `simd`: each iteration calls powf() via _pq_to_nits(), which the
+// vectorizer cannot lower, so simd only produces a -Wpass-failed note. The
+// loop is still parallelized across threads.
+#pragma omp parallel for \
     reduction(max : max_cll) reduction(+ : sum_fall) schedule(static)
 #endif
   for(size_t k = 0; k < npixels; k++)
