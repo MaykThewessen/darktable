@@ -48,22 +48,11 @@ enum ultrahdr_gainmap_downscale_e
 
 static const int ultrahdr_gainmap_scale[] = { 1, 2, 4 };
 
+/* Module defaults, also declared in data/darktableconfig.xml.in. Used for the
+ * slider construction default and the gui_reset() values; the runtime conf
+ * keys are read with dt_conf_get_int() (the xml supplies the stored default). */
 #define ULTRAHDR_DEFAULT_QUALITY 95
 #define ULTRAHDR_DEFAULT_GAINMAP_QUALITY 95
-
-/*
- * The conf keys are not declared in darktableconfig.xml.in (the module ships as
- * an optional, self-contained drop-in), so dt_conf_get_int() returns 0 for an
- * unset key on first run. Treat an out-of-range value as "unset" and fall back
- * to the default so a fresh install produces a sensible quality.
- */
-static int ultrahdr_conf_quality(const char *key, const int fallback)
-{
-  if(!dt_conf_key_exists(key))
-    return fallback;
-  const int q = dt_conf_get_int(key);
-  return (q >= 0 && q <= 100) ? q : fallback;
-}
 
 typedef struct dt_imageio_ultrahdr_t
 {
@@ -319,10 +308,8 @@ void *get_params(dt_imageio_module_format_t *self)
     return NULL;
 
   d->bpp = 32;
-  d->quality = ultrahdr_conf_quality("plugins/imageio/format/ultrahdr/quality",
-                                     ULTRAHDR_DEFAULT_QUALITY);
-  d->gainmap_quality = ultrahdr_conf_quality("plugins/imageio/format/ultrahdr/gainmap_quality",
-                                             ULTRAHDR_DEFAULT_GAINMAP_QUALITY);
+  d->quality = dt_conf_get_int("plugins/imageio/format/ultrahdr/quality");
+  d->gainmap_quality = dt_conf_get_int("plugins/imageio/format/ultrahdr/gainmap_quality");
   d->gainmap_downscale = dt_conf_get_int("plugins/imageio/format/ultrahdr/gainmap_downscale");
 
   if(d->gainmap_downscale < 0 || d->gainmap_downscale > ULTRAHDR_GAINMAP_QUARTER)
@@ -417,10 +404,8 @@ void gui_init(dt_imageio_module_format_t *self)
   dt_imageio_ultrahdr_gui_t *gui = malloc(sizeof(dt_imageio_ultrahdr_gui_t));
   self->gui_data = (void *)gui;
 
-  const int quality = ultrahdr_conf_quality("plugins/imageio/format/ultrahdr/quality",
-                                            ULTRAHDR_DEFAULT_QUALITY);
-  const int gainmap_quality = ultrahdr_conf_quality("plugins/imageio/format/ultrahdr/gainmap_quality",
-                                                    ULTRAHDR_DEFAULT_GAINMAP_QUALITY);
+  const int quality = dt_conf_get_int("plugins/imageio/format/ultrahdr/quality");
+  const int gainmap_quality = dt_conf_get_int("plugins/imageio/format/ultrahdr/gainmap_quality");
   const int gainmap_downscale = dt_conf_get_int("plugins/imageio/format/ultrahdr/gainmap_downscale");
 
   /*
