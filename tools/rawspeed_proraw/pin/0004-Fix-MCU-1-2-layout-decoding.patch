@@ -1,0 +1,188 @@
+From ad2ade3248012a7e3f7b306cf4a97e885e942bff Mon Sep 17 00:00:00 2001
+From: Philipp Lutz <philipp.lutz@gmx.de>
+Date: Sat, 18 Apr 2026 13:27:01 +0200
+Subject: [PATCH 04/10] Fix MCU{1,2} layout decoding
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Some DNG files encode 2-component tiles (e.g., 592×158) as JPEG frames with the component dimension packed horizontally into a narrower, taller JPEG (592×79, 2 components). The JPEG SOF reports half the tile height, with each row encoding two consecutive output rows' worth of data — components are always interleaved horizontally, so the effective decoded width per JPEG row is jpegFrameDim.x × N_COMP = 1184.
+
+LJpegDecompressor.cpp — allow MCU{1,2} construction and dispatch
+
+The constructor's MCU allowlist and decode()'s dispatch table gain {1,2}. This is needed so the decompressor can be instantiated when the caller passes MCU{1,2} (it will never be used for actual pixel output after the decoder fix below, but the validation and dispatch must not reject it at an early stage).
+
+LJpegDecoder.cpp — detect vertical MCU and route to the inverted reshape path
+
+Two complementary changes:
+
+* In the standard (non-inverted) path, after computing MCUSize = maxRes / jpegFrameDim, gate the direct-decode branch on MCUSize.x >= MCUSize.y. When MCUSize is purely vertical (e.g., {1,2}), fall through instead of decoding in-place.
+
+* Generalize the inverted reshape path to handle N_COMP > 1:
+  * effectiveJpegWidth = jpegFrameDim.x × N_COMP replaces jpegFrameDim.x everywhere in width calculations.
+  * The temporary decode buffer is sized effectiveJpegWidth × jpegFrameDim.y.
+  * MCU is set to {N_COMP, 1} (horizontal interleaving), not hardcoded {1,1}.
+  * The N_COMP != 1 guard is removed.
+  * widthPack is derived from effectiveJpegWidth / maxRes.x, so for the 2-comp example: 1184 / 592 = 2, matching the tile's 158 / 79 = 2× height ratio.
+
+This correctly reconstructs the full-width, full-height tile from the narrower, shorter JPEG frame, yielding proper CFA Bayer output instead of the full-image purple/orange vertical stripe pattern that occurred when the two components were written to separate rows.
+
+(cherry picked from commit d8577b1229438acac1afb0c4937e44cf7f04f6a5)
+---
+ .../decompressors/LJpegDecoder.cpp            | 87 +++++++++++--------
+ .../decompressors/LJpegDecompressor.cpp       |  7 +-
+ 2 files changed, 54 insertions(+), 40 deletions(-)
+
+diff --git a/src/librawspeed/decompressors/LJpegDecoder.cpp b/src/librawspeed/decompressors/LJpegDecoder.cpp
+index a42aa8d9..082b20e0 100644
+--- a/src/librawspeed/decompressors/LJpegDecoder.cpp
++++ b/src/librawspeed/decompressors/LJpegDecoder.cpp
+@@ -152,57 +152,68 @@ Buffer::size_type LJpegDecoder::decodeScan() {
+     if (MCUSize.area() != implicit_cast<uint64_t>(N_COMP))
+       ThrowRDE("Unexpected MCU size, does not match LJpeg component count");
+ 
+-    const iRectangle2D imgFrame = {
+-        {static_cast<int>(offX), static_cast<int>(offY)},
+-        {static_cast<int>(w), static_cast<int>(h)}};
+-    const LJpegDecompressor::Frame jpegFrame = {MCUSize, jpegFrameDim};
+-
+-    int numLJpegRowsPerRestartInterval;
+-    if (numMCUsPerRestartInterval == 0) {
+-      numLJpegRowsPerRestartInterval = jpegFrameDim.y;
+-    } else {
+-      const int numMCUsPerRow = jpegFrameDim.x;
+-      if (numMCUsPerRestartInterval % numMCUsPerRow != 0)
+-        ThrowRDE("Restart interval is not a multiple of frame row size");
+-      numLJpegRowsPerRestartInterval =
+-          numMCUsPerRestartInterval / numMCUsPerRow;
++    // Standard MCU layouts have MCU.x >= MCU.y: {1,1}, {2,1}, {3,1},
++    // {4,1}, {2,2}. If the MCU is purely vertical (e.g., {1,2}), the
++    // encoder uses horizontal component interleaving with wider effective
++    // JPEG rows that must be reshaped. Fall through to inverted reshape.
++    if (MCUSize.x >= MCUSize.y) {
++      const iRectangle2D imgFrame = {
++          {static_cast<int>(offX), static_cast<int>(offY)},
++          {static_cast<int>(w), static_cast<int>(h)}};
++      const LJpegDecompressor::Frame jpegFrame = {MCUSize, jpegFrameDim};
++
++      int numLJpegRowsPerRestartInterval;
++      if (numMCUsPerRestartInterval == 0) {
++        numLJpegRowsPerRestartInterval = jpegFrameDim.y;
++      } else {
++        const int numMCUsPerRow = jpegFrameDim.x;
++        if (numMCUsPerRestartInterval % numMCUsPerRow != 0)
++          ThrowRDE("Restart interval is not a multiple of frame row size");
++        numLJpegRowsPerRestartInterval =
++            numMCUsPerRestartInterval / numMCUsPerRow;
++      }
++
++      LJpegDecompressor d(mRaw, imgFrame, jpegFrame, rec,
++                          numLJpegRowsPerRestartInterval,
++                          implicit_cast<int>(predictorMode),
++                          input.peekRemainingBuffer().getAsArray1DRef());
++      return d.decode();
+     }
+-
+-    LJpegDecompressor d(mRaw, imgFrame, jpegFrame, rec,
+-                        numLJpegRowsPerRestartInterval,
+-                        implicit_cast<int>(predictorMode),
+-                        input.peekRemainingBuffer().getAsArray1DRef());
+-    return d.decode();
+   }
+ 
+-  // Inverted reshape case (DJI/Blackmagic CinemaDNG):
+-  // JPEG frame is wider than tile, e.g. JPEG=8000x1500 1-comp, tile=4000x3000.
+-  // Each JPEG row contains 'widthPack' tile rows concatenated.
+-  if (N_COMP != 1)
+-    ThrowRDE("Inverted reshape only supported for single-component LJpeg");
+-
+-  if (jpegFrameDim.x % maxRes.x != 0)
+-    ThrowRDE("LJpeg frame width is not a multiple of tile width");
++  // Inverted reshape case:
++  // The effective decoded width per JPEG row exceeds the tile width.
++  // This occurs when:
++  //   (a) The JPEG frame is wider than the tile (DJI/Blackmagic CinemaDNG):
++  //       e.g., JPEG=8000x1500 1-comp, tile=4000x3000.
++  //   (b) Multi-component JPEG with vertical MCU ratio:
++  //       e.g., JPEG=592x79 2-comp, tile=592x158 (effectiveWidth=1184).
++  // In both cases, components are interleaved horizontally, and each JPEG row
++  // contains 'widthPack' tile rows of pixel data concatenated.
++  const int effectiveJpegWidth = jpegFrameDim.x * N_COMP;
++
++  if (effectiveJpegWidth % maxRes.x != 0)
++    ThrowRDE("Effective JPEG width is not a multiple of tile width");
+   if (maxRes.y % jpegFrameDim.y != 0)
+     ThrowRDE("Tile height is not a multiple of LJpeg frame height");
+ 
+-  const int widthPack = jpegFrameDim.x / maxRes.x;
++  const int widthPack = effectiveJpegWidth / maxRes.x;
+   if (widthPack * jpegFrameDim.y != maxRes.y)
+     ThrowRDE("Inverted reshape dimensions mismatch");
+ 
+   if (widthPack < 1 || widthPack > 4)
+     ThrowRDE("Unexpected row packing factor: %d", widthPack);
+ 
+-  // Decode into a temporary buffer at JPEG frame dimensions.
+-  // MCU is {1,1} since we have a single component.
+-  const auto MCUSize = iPoint2D{1, 1};
++  // Decode into a temporary buffer at effective decoded dimensions.
++  // Components are always interleaved horizontally: MCU{N_COMP, 1}.
++  const auto MCUSize = iPoint2D{N_COMP, 1};
+ 
+   // Create a temporary raw image to decode the JPEG into.
+   // RawImage::create with dimensions already calls createData() internally.
+-  RawImage tmpRaw = RawImage::create(iPoint2D(jpegFrameDim.x, jpegFrameDim.y),
+-                                     RawImageType::UINT16, 1);
++  RawImage tmpRaw = RawImage::create(
++      iPoint2D(effectiveJpegWidth, jpegFrameDim.y), RawImageType::UINT16, 1);
+ 
+-  const iRectangle2D tmpFrame = {{0, 0}, {jpegFrameDim.x, jpegFrameDim.y}};
++  const iRectangle2D tmpFrame = {{0, 0}, {effectiveJpegWidth, jpegFrameDim.y}};
+   const LJpegDecompressor::Frame jpegFrame = {MCUSize, jpegFrameDim};
+ 
+   int numLJpegRowsPerRestartInterval;
+@@ -226,8 +237,8 @@ Buffer::size_type LJpegDecoder::decodeScan() {
+   const auto tmpData = tmpRaw->getU16DataAsUncroppedArray2DRef();
+   const auto outData = mRaw->getU16DataAsUncroppedArray2DRef();
+ 
+-  const int tileW = implicit_cast<int>(w);
+-  const int cpp = implicit_cast<int>(mRaw->getCpp());
++  const auto tileW = implicit_cast<int>(w);
++  const auto cpp = implicit_cast<int>(mRaw->getCpp());
+   const int outRowPixels = cpp * tileW;
+ 
+   for (int jpegRow = 0; jpegRow < jpegFrameDim.y; ++jpegRow) {
+@@ -238,7 +249,7 @@ Buffer::size_type LJpegDecoder::decodeScan() {
+       const int srcCol = pack * outRowPixels;
+       const int dstCol = cpp * implicit_cast<int>(offX);
+       // Contiguous row-segment copy. Bounds guaranteed by validation:
+-      // srcCol + outRowPixels <= widthPack * outRowPixels <= jpegFrameDim.x
++      // srcCol + outRowPixels <= widthPack * outRowPixels <= effectiveJpegWidth
+       std::memcpy(&outData(tileRow, dstCol), &tmpData(jpegRow, srcCol),
+                   sizeof(uint16_t) * outRowPixels);
+     }
+diff --git a/src/librawspeed/decompressors/LJpegDecompressor.cpp b/src/librawspeed/decompressors/LJpegDecompressor.cpp
+index ee389916..5ef2d66f 100644
+--- a/src/librawspeed/decompressors/LJpegDecompressor.cpp
++++ b/src/librawspeed/decompressors/LJpegDecompressor.cpp
+@@ -102,8 +102,8 @@ LJpegDecompressor::LJpegDecompressor(RawImage img, iRectangle2D imgFrame_,
+     ThrowRDE("Frame has zero size");
+ 
+   if (iPoint2D{1, 1} != frame.mcu && iPoint2D{2, 1} != frame.mcu &&
+-      iPoint2D{3, 1} != frame.mcu && iPoint2D{4, 1} != frame.mcu &&
+-      iPoint2D{2, 2} != frame.mcu)
++      iPoint2D{1, 2} != frame.mcu && iPoint2D{3, 1} != frame.mcu &&
++      iPoint2D{4, 1} != frame.mcu && iPoint2D{2, 2} != frame.mcu)
+     ThrowRDE("Unexpected MCU size: {%i, %i}", frame.mcu.x, frame.mcu.y);
+ 
+   if (rec.size() != static_cast<unsigned>(frame.mcu.area()))
+@@ -423,6 +423,9 @@ ByteStream::size_type LJpegDecompressor::decode() const {
+     if (frame.mcu == MCU<2, 1>) {
+       return decodeN<MCU<2, 1>>();
+     }
++    if (frame.mcu == MCU<1, 2>) {
++      return decodeN<MCU<1, 2>>();
++    }
+     break;
+   case 3:
+     if (frame.mcu == MCU<3, 1>) {

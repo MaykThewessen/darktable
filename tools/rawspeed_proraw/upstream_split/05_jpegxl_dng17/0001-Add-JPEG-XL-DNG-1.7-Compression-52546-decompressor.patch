@@ -1,0 +1,412 @@
+From 7c37eab0e4eb6e157b720c4cac7189c334ea8a9e Mon Sep 17 00:00:00 2001
+From: Mayk Thewessen <mayk_12@hotmail.com>
+Date: Sun, 21 Jun 2026 22:19:05 +0200
+Subject: [PATCH] Add JPEG XL (DNG 1.7 / Compression 52546) decompressor
+
+Adds libjxl-backed decoding of DNG tiles compressed as JPEG XL
+(TIFF Compression 52546, DNG 1.7), as used by Apple ProRAW on the
+iPhone 16. Structured like the existing lossy-JPEG path:
+
+- cmake: WITH_JPEGXL option + pkg-config libjxl detection -> HAVE_JPEGXL
+- config.h.in: HAVE_JPEGXL define
+- JpegXlDecompressor: RAII-guarded libjxl decode loop, validates channel
+  count and dimensions, clipped copy of the decoded tile into the raw buffer
+- DngDecoder: accept compression 52546 in dropUnsupportedChunks
+- AbstractDngDecompressor: dispatch compression 52546 to the JPEG XL decoder
+
+Gated behind HAVE_JPEGXL; when disabled a #pragma message warns and the
+compression is reported unsupported.
+
+(cherry picked from commit 2c3dfc5779b604b647956ef2f4c292e943ab1d79)
+---
+ CMakeLists.txt                                |   1 +
+ cmake/src-dependencies.cmake                  |  23 +++
+ src/config.h.in                               |   2 +
+ src/librawspeed/decoders/DngDecoder.cpp       |  12 ++
+ .../decompressors/AbstractDngDecompressor.cpp |  35 +++++
+ src/librawspeed/decompressors/CMakeLists.txt  |   6 +
+ .../decompressors/JpegXlDecompressor.cpp      | 140 ++++++++++++++++++
+ .../decompressors/JpegXlDecompressor.h        |  56 +++++++
+ 8 files changed, 275 insertions(+)
+ create mode 100644 src/librawspeed/decompressors/JpegXlDecompressor.cpp
+ create mode 100644 src/librawspeed/decompressors/JpegXlDecompressor.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2346db8d..af15a818 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -80,6 +80,7 @@ else()
+   set(ALLOW_DOWNLOADING_PUGIXML OFF CACHE BOOL "If pugixml src tree is not found in location specified by PUGIXML_PATH, do fetch the archive from internet" FORCE)
+ endif()
+ option(WITH_JPEG "Enable JPEG support for DNG Lossy JPEG support" ON)
++option(WITH_JPEGXL "Enable JPEG XL support for DNG 1.7 JPEG XL compression" ON)
+ option(WITH_ZLIB "Enable ZLIB support for DNG deflate support" ON)
+ if(WITH_ZLIB)
+   option(USE_BUNDLED_ZLIB "Build and use zlib in-tree" OFF)
+diff --git a/cmake/src-dependencies.cmake b/cmake/src-dependencies.cmake
+index a9a887e6..59619ea8 100644
+--- a/cmake/src-dependencies.cmake
++++ b/cmake/src-dependencies.cmake
+@@ -184,6 +184,29 @@ else()
+ endif()
+ add_feature_info("Lossy JPEG decoding" HAVE_JPEG "used for DNG Lossy JPEG compression decoding")
+ 
++unset(HAVE_JPEGXL)
++if(WITH_JPEGXL)
++  message(STATUS "Looking for JPEG XL (libjxl)")
++  find_package(PkgConfig QUIET)
++  if(PkgConfig_FOUND)
++    pkg_check_modules(libjxl IMPORTED_TARGET libjxl)
++  endif()
++  if(NOT libjxl_FOUND)
++    message(SEND_ERROR "Did not find libjxl! Either install jpeg-xl, or pass -DWITH_JPEGXL=OFF to disable JPEG XL.")
++  else()
++    message(STATUS "Looking for JPEG XL - found (${libjxl_VERSION})")
++    set(HAVE_JPEGXL 1)
++    target_link_libraries(rawspeed PRIVATE PkgConfig::libjxl)
++    set_package_properties(libjxl PROPERTIES
++                           TYPE RECOMMENDED
++                           DESCRIPTION "JPEG XL reference codec library"
++                           PURPOSE "Used for decoding DNG JPEG XL (DNG 1.7) compression")
++  endif()
++else()
++  message(STATUS "JPEG XL is disabled, DNG JPEG XL (DNG 1.7) support won't be available.")
++endif()
++add_feature_info("JPEG XL decoding" HAVE_JPEGXL "used for DNG JPEG XL (DNG 1.7) compression decoding")
++
+ unset(HAVE_ZLIB)
+ if (WITH_ZLIB)
+   message(STATUS "Looking for ZLIB")
+diff --git a/src/config.h.in b/src/config.h.in
+index 623d1417..0e42746e 100644
+--- a/src/config.h.in
++++ b/src/config.h.in
+@@ -65,6 +65,8 @@ static_assert(RAWSPEED_LARGEPAGESIZE >= RAWSPEED_PAGESIZE,
+ #cmakedefine HAVE_JPEG
+ #cmakedefine HAVE_JPEG_MEM_SRC
+ 
++#cmakedefine HAVE_JPEGXL
++
+ #cmakedefine HAVE_CXX_THREAD_LOCAL
+ #cmakedefine HAVE_GCC_THREAD_LOCAL
+ 
+diff --git a/src/librawspeed/decoders/DngDecoder.cpp b/src/librawspeed/decoders/DngDecoder.cpp
+index ecd11989..4d5cace6 100644
+--- a/src/librawspeed/decoders/DngDecoder.cpp
++++ b/src/librawspeed/decoders/DngDecoder.cpp
+@@ -119,6 +119,9 @@ void DngDecoder::dropUnsuportedChunks(std::vector<const TiffIFD*>* data) {
+     case 9: // VC-5 as used by GoPro
+ #ifdef HAVE_JPEG
+     case 0x884c: // lossy JPEG
++#endif
++#ifdef HAVE_JPEGXL
++    case 52546: // JPEG XL (DNG 1.7)
+ #endif
+                  // no change, if supported, then is still supported.
+       break;
+@@ -140,6 +143,15 @@ void DngDecoder::dropUnsuportedChunks(std::vector<const TiffIFD*>* data) {
+                                     "chunk, but the jpeg support was "
+                                     "disabled at build!");
+       [[clang::fallthrough]];
++#endif
++#ifndef HAVE_JPEGXL
++    case 52546: // JPEG XL (DNG 1.7)
++#pragma message                                                                \
++    "JPEG XL is not present! DNG JPEG XL compression will not be supported!"
++      writeLog(DEBUG_PRIO::WARNING, "DNG Decoder: found JPEG XL-encoded "
++                                    "chunk, but JPEG XL support was "
++                                    "disabled at build!");
++      [[clang::fallthrough]];
+ #endif
+     default:
+       supported = false;
+diff --git a/src/librawspeed/decompressors/AbstractDngDecompressor.cpp b/src/librawspeed/decompressors/AbstractDngDecompressor.cpp
+index b828a4fe..83b27bea 100644
+--- a/src/librawspeed/decompressors/AbstractDngDecompressor.cpp
++++ b/src/librawspeed/decompressors/AbstractDngDecompressor.cpp
+@@ -49,6 +49,10 @@
+ #include "decompressors/JpegDecompressor.h"
+ #endif
+ 
++#ifdef HAVE_JPEGXL
++#include "decompressors/JpegXlDecompressor.h"
++#endif
++
+ namespace rawspeed {
+ 
+ template <> void AbstractDngDecompressor::decompressThread<1>() const noexcept {
+@@ -201,6 +205,29 @@ void AbstractDngDecompressor::decompressThread<0x884c>() const noexcept {
+ }
+ #endif
+ 
++#ifdef HAVE_JPEGXL
++template <>
++void AbstractDngDecompressor::decompressThread<52546>() const noexcept {
++#ifdef HAVE_OPENMP
++#pragma omp for schedule(static)
++#endif
++  for (const auto& e :
++       Array1DRef(slices.data(), implicit_cast<int>(slices.size()))) {
++    try {
++      JpegXlDecompressor j(e.bs.peekBuffer(e.bs.getRemainSize()), mRaw);
++      j.decode(e.offX, e.offY);
++    } catch (const RawDecoderException& err) {
++      mRaw->setError(err.what());
++    } catch (const IOException& err) {
++      mRaw->setError(err.what());
++    } catch (...) {
++      // We should not get any other exception type here.
++      __builtin_unreachable();
++    }
++  }
++}
++#endif
++
+ void AbstractDngDecompressor::decompressThread() const noexcept {
+   invariant(mRaw->dim.x > 0);
+   invariant(mRaw->dim.y > 0);
+@@ -232,6 +259,14 @@ void AbstractDngDecompressor::decompressThread() const noexcept {
+ #else
+ #pragma message "JPEG is not present! Lossy JPEG DNG will not be supported!"
+     mRaw->setError("jpeg support is disabled.");
++#endif
++  } else if (compression == 52546) {
++    /* JPEG XL (DNG 1.7) */
++#ifdef HAVE_JPEGXL
++    decompressThread<52546>();
++#else
++#pragma message "JPEG XL is not present! DNG JPEG XL will not be supported!"
++    mRaw->setError("JPEG XL support is disabled.");
+ #endif
+   } else {
+     mRaw->setError("AbstractDngDecompressor: Unknown compression");
+diff --git a/src/librawspeed/decompressors/CMakeLists.txt b/src/librawspeed/decompressors/CMakeLists.txt
+index 8933a3ad..20627c34 100644
+--- a/src/librawspeed/decompressors/CMakeLists.txt
++++ b/src/librawspeed/decompressors/CMakeLists.txt
+@@ -26,6 +26,8 @@ FILE(GLOB SOURCES
+   "JpegDecompressor.cpp"
+   "JpegDecompressor.h"
+   "JpegMarkers.h"
++  "JpegXlDecompressor.cpp"
++  "JpegXlDecompressor.h"
+   "KodakDecompressor.cpp"
+   "KodakDecompressor.h"
+   "LJpegDecoder.cpp"
+@@ -82,4 +84,8 @@ if(WITH_JPEG AND TARGET JPEG::JPEG)
+   target_link_libraries(rawspeed_decompressors PUBLIC JPEG::JPEG)
+ endif()
+ 
++if(WITH_JPEGXL AND TARGET PkgConfig::libjxl)
++  target_link_libraries(rawspeed_decompressors PUBLIC PkgConfig::libjxl)
++endif()
++
+ target_link_libraries(rawspeed PRIVATE rawspeed_decompressors)
+diff --git a/src/librawspeed/decompressors/JpegXlDecompressor.cpp b/src/librawspeed/decompressors/JpegXlDecompressor.cpp
+new file mode 100644
+index 00000000..7b7b4702
+--- /dev/null
++++ b/src/librawspeed/decompressors/JpegXlDecompressor.cpp
+@@ -0,0 +1,140 @@
++/*
++    RawSpeed - RAW file decoder.
++
++    Copyright (C) 2026 darktable developers
++
++    This library is free software; you can redistribute it and/or
++    modify it under the terms of the GNU Lesser General Public
++    License as published by the Free Software Foundation; either
++    version 2 of the License, or (at your option) any later version.
++
++    This library is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++    Lesser General Public License for more details.
++
++    You should have received a copy of the GNU Lesser General Public
++    License along with this library; if not, write to the Free Software
++    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++*/
++
++#include "rawspeedconfig.h" // IWYU pragma: keep
++
++#ifdef HAVE_JPEGXL
++
++#include "adt/Array2DRef.h"
++#include "adt/Point.h"
++#include "decoders/RawDecoderException.h"
++#include "decompressors/JpegXlDecompressor.h"
++#include <algorithm>
++#include <cstddef>
++#include <cstdint>
++#include <jxl/decode.h>
++#include <vector>
++
++using std::min;
++
++namespace rawspeed {
++
++namespace {
++// RAII wrapper so JxlDecoderDestroy runs on every exit path (incl. throws).
++struct JxlDecoderGuard final {
++  JxlDecoder* dec;
++  explicit JxlDecoderGuard(JxlDecoder* d) : dec(d) {}
++  JxlDecoderGuard(const JxlDecoderGuard&) = delete;
++  JxlDecoderGuard(JxlDecoderGuard&&) = delete;
++  JxlDecoderGuard& operator=(const JxlDecoderGuard&) = delete;
++  JxlDecoderGuard& operator=(JxlDecoderGuard&&) = delete;
++  ~JxlDecoderGuard() { JxlDecoderDestroy(dec); }
++};
++} // namespace
++
++void JpegXlDecompressor::decode(uint32_t offX, uint32_t offY) {
++  JxlDecoder* dec = JxlDecoderCreate(nullptr);
++  if (dec == nullptr)
++    ThrowRDE("JXL: JxlDecoderCreate failed");
++  JxlDecoderGuard guard(dec);
++
++  if (JXL_DEC_SUCCESS !=
++      JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE))
++    ThrowRDE("JXL: JxlDecoderSubscribeEvents failed");
++
++  // rawspeed/darktable handle orientation themselves; do not auto-rotate.
++  if (JXL_DEC_SUCCESS != JxlDecoderSetKeepOrientation(dec, JXL_TRUE))
++    ThrowRDE("JXL: JxlDecoderSetKeepOrientation failed");
++
++  if (JXL_DEC_SUCCESS !=
++      JxlDecoderSetInput(dec, input.begin(), input.getSize()))
++    ThrowRDE("JXL: JxlDecoderSetInput failed");
++  JxlDecoderCloseInput(dec);
++
++  const uint32_t cpp = mRaw->getCpp();
++  const JxlPixelFormat fmt = {/*num_channels=*/cpp,
++                              /*data_type=*/JXL_TYPE_UINT16,
++                              /*endianness=*/JXL_LITTLE_ENDIAN,
++                              /*align=*/0};
++
++  JxlBasicInfo info = {};
++  uint32_t jxl_w = 0;
++  uint32_t jxl_h = 0;
++  std::vector<uint16_t> pixels;
++
++  for (;;) {
++    const JxlDecoderStatus status = JxlDecoderProcessInput(dec);
++    if (status == JXL_DEC_ERROR)
++      ThrowRDE("JXL: decoding error");
++    if (status == JXL_DEC_NEED_MORE_INPUT)
++      ThrowRDE("JXL: needs more input (truncated tile?)");
++    if (status == JXL_DEC_BASIC_INFO) {
++      if (JXL_DEC_SUCCESS != JxlDecoderGetBasicInfo(dec, &info))
++        ThrowRDE("JXL: JxlDecoderGetBasicInfo failed");
++      jxl_w = info.xsize;
++      jxl_h = info.ysize;
++      if (info.num_color_channels != cpp)
++        ThrowRDE("JXL: color channel count %u does not match cpp %u",
++                 info.num_color_channels, cpp);
++      continue;
++    }
++    if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
++      size_t buf_size = 0;
++      if (JXL_DEC_SUCCESS != JxlDecoderImageOutBufferSize(dec, &fmt, &buf_size))
++        ThrowRDE("JXL: JxlDecoderImageOutBufferSize failed");
++      pixels.resize(buf_size / sizeof(uint16_t));
++      if (JXL_DEC_SUCCESS !=
++          JxlDecoderSetImageOutBuffer(dec, &fmt, pixels.data(), buf_size))
++        ThrowRDE("JXL: JxlDecoderSetImageOutBuffer failed");
++      continue;
++    }
++    if (status == JXL_DEC_FULL_IMAGE)
++      continue; // image now in `pixels`
++    if (status == JXL_DEC_SUCCESS)
++      break;
++    ThrowRDE("JXL: unexpected decoder status %d", static_cast<int>(status));
++  }
++
++  if (pixels.empty() || jxl_w == 0 || jxl_h == 0)
++    ThrowRDE("JXL: no pixel data decoded");
++
++  // Copy the decoded interleaved uint16 tile into the raw buffer at
++  // (offX,offY).
++  const uint32_t copy_w = min(static_cast<uint32_t>(mRaw->dim.x) - offX, jxl_w);
++  const uint32_t copy_h = min(static_cast<uint32_t>(mRaw->dim.y) - offY, jxl_h);
++
++  const Array2DRef<uint16_t> out(mRaw->getU16DataAsUncroppedArray2DRef());
++  for (uint32_t row = 0; row < copy_h; ++row) {
++    for (uint32_t col = 0; col < cpp * copy_w; ++col) {
++      out(static_cast<int>(row + offY), static_cast<int>(cpp * offX + col)) =
++          pixels[(static_cast<size_t>(row) * jxl_w * cpp) + col];
++    }
++  }
++}
++
++} // namespace rawspeed
++
++#else
++
++#pragma message                                                                \
++    "JPEG XL is not present! DNG JPEG XL (DNG 1.7) compression will not be "   \
++    "supported!"
++
++#endif
+diff --git a/src/librawspeed/decompressors/JpegXlDecompressor.h b/src/librawspeed/decompressors/JpegXlDecompressor.h
+new file mode 100644
+index 00000000..7cbcef08
+--- /dev/null
++++ b/src/librawspeed/decompressors/JpegXlDecompressor.h
+@@ -0,0 +1,56 @@
++/*
++    RawSpeed - RAW file decoder.
++
++    Copyright (C) 2026 darktable developers
++
++    This library is free software; you can redistribute it and/or
++    modify it under the terms of the GNU Lesser General Public
++    License as published by the Free Software Foundation; either
++    version 2 of the License, or (at your option) any later version.
++
++    This library is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++    Lesser General Public License for more details.
++
++    You should have received a copy of the GNU Lesser General Public
++    License along with this library; if not, write to the Free Software
++    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++*/
++
++#pragma once
++
++#include "rawspeedconfig.h"
++
++#ifdef HAVE_JPEGXL
++
++#include "common/RawImage.h"
++#include "decompressors/AbstractDecompressor.h"
++#include "io/Buffer.h"
++#include <cstdint>
++#include <utility>
++
++namespace rawspeed {
++
++// Decodes a single DNG tile whose data is a self-contained JPEG XL codestream
++// (TIFF Compression tag 52546, as used by Apple ProRAW on iPhone 16 / DNG 1.7).
++class JpegXlDecompressor final : public AbstractDecompressor {
++  Buffer input;
++  RawImage mRaw;
++
++public:
++  JpegXlDecompressor(Buffer bs, RawImage img)
++      : input(bs), mRaw(std::move(img)) {}
++
++  void decode(uint32_t offsetX, uint32_t offsetY);
++};
++
++} // namespace rawspeed
++
++#else
++
++#pragma message                                                                \
++    "JPEG XL is not present! DNG JPEG XL (DNG 1.7) compression will not be "   \
++    "supported!"
++
++#endif

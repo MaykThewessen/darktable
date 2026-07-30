@@ -1,0 +1,105 @@
+From 6bed940a3bbe5a1685caee10bc98e36b8f7154de Mon Sep 17 00:00:00 2001
+From: Philipp Lutz <philipp.lutz@gmx.de>
+Date: Sat, 18 Apr 2026 12:07:09 +0200
+Subject: [PATCH 03/10] Apply clang-format
+
+(cherry picked from commit fb89fea813f3ae5d931635c2d0a6c0e5679da471)
+---
+ .../decompressors/LJpegDecoder.cpp            | 13 +++++------
+ .../decompressors/LJpegDecompressor.cpp       | 22 +++++++++----------
+ .../decompressors/LJpegDecompressor.h         |  3 +--
+ 3 files changed, 16 insertions(+), 22 deletions(-)
+
+diff --git a/src/librawspeed/decompressors/LJpegDecoder.cpp b/src/librawspeed/decompressors/LJpegDecoder.cpp
+index b8b2145c..a42aa8d9 100644
+--- a/src/librawspeed/decompressors/LJpegDecoder.cpp
++++ b/src/librawspeed/decompressors/LJpegDecoder.cpp
+@@ -199,11 +199,10 @@ Buffer::size_type LJpegDecoder::decodeScan() {
+ 
+   // Create a temporary raw image to decode the JPEG into.
+   // RawImage::create with dimensions already calls createData() internally.
+-  RawImage tmpRaw = RawImage::create(
+-      iPoint2D(jpegFrameDim.x, jpegFrameDim.y), RawImageType::UINT16, 1);
++  RawImage tmpRaw = RawImage::create(iPoint2D(jpegFrameDim.x, jpegFrameDim.y),
++                                     RawImageType::UINT16, 1);
+ 
+-  const iRectangle2D tmpFrame = {
+-      {0, 0}, {jpegFrameDim.x, jpegFrameDim.y}};
++  const iRectangle2D tmpFrame = {{0, 0}, {jpegFrameDim.x, jpegFrameDim.y}};
+   const LJpegDecompressor::Frame jpegFrame = {MCUSize, jpegFrameDim};
+ 
+   int numLJpegRowsPerRestartInterval;
+@@ -213,8 +212,7 @@ Buffer::size_type LJpegDecoder::decodeScan() {
+     const int numMCUsPerRow = jpegFrameDim.x;
+     if (numMCUsPerRestartInterval % numMCUsPerRow != 0)
+       ThrowRDE("Restart interval is not a multiple of frame row size");
+-    numLJpegRowsPerRestartInterval =
+-        numMCUsPerRestartInterval / numMCUsPerRow;
++    numLJpegRowsPerRestartInterval = numMCUsPerRestartInterval / numMCUsPerRow;
+   }
+ 
+   LJpegDecompressor d(tmpRaw, tmpFrame, jpegFrame, rec,
+@@ -234,8 +232,7 @@ Buffer::size_type LJpegDecoder::decodeScan() {
+ 
+   for (int jpegRow = 0; jpegRow < jpegFrameDim.y; ++jpegRow) {
+     for (int pack = 0; pack < widthPack; ++pack) {
+-      const int tileRow =
+-          implicit_cast<int>(offY) + jpegRow * widthPack + pack;
++      const int tileRow = implicit_cast<int>(offY) + jpegRow * widthPack + pack;
+       if (tileRow >= mRaw->dim.y)
+         continue;
+       const int srcCol = pack * outRowPixels;
+diff --git a/src/librawspeed/decompressors/LJpegDecompressor.cpp b/src/librawspeed/decompressors/LJpegDecompressor.cpp
+index b5f2bcb1..ee389916 100644
+--- a/src/librawspeed/decompressors/LJpegDecompressor.cpp
++++ b/src/librawspeed/decompressors/LJpegDecompressor.cpp
+@@ -246,9 +246,8 @@ void LJpegDecompressor::decodeRowN(
+           const int Ra = pred(MCURow, MCUСol);
+           const int stripeCol = MCUSize.x * mcuIdx + MCUСol;
+           const int Rb = prevStripe(MCURow, stripeCol);
+-          const int Rc = (mcuIdx > 0)
+-                             ? prevStripe(MCURow, stripeCol - MCUSize.x)
+-                             : Rb;
++          const int Rc =
++              (mcuIdx > 0) ? prevStripe(MCURow, stripeCol - MCUSize.x) : Rb;
+           prediction = computePrediction(predictorMode, Ra, Rb, Rc);
+         }
+         const int diff = (static_cast<const PrefixCodeDecoder<>&>(ht[c]))
+@@ -383,15 +382,14 @@ ByteStream::size_type LJpegDecompressor::decodeN() const {
+       // For the first row, prevStripe points to outStripe itself (unused
+       // since Use2DPred will be false).
+       const Array2DRef<const uint16_t> prevStripe =
+-          isFirstRow
+-              ? Array2DRef<const uint16_t>(outStripe)
+-              : CroppedArray2DRef<const uint16_t>(
+-                    img,
+-                    /*offsetCols=*/0,
+-                    /*offsetRows=*/row - frame.mcu.y,
+-                    /*croppedWidth=*/img.width(),
+-                    /*croppedHeight=*/frame.mcu.y)
+-                    .getAsArray2DRef();
++          isFirstRow ? Array2DRef<const uint16_t>(outStripe)
++                     : CroppedArray2DRef<const uint16_t>(
++                           img,
++                           /*offsetCols=*/0,
++                           /*offsetRows=*/row - frame.mcu.y,
++                           /*croppedWidth=*/img.width(),
++                           /*croppedHeight=*/frame.mcu.y)
++                           .getAsArray2DRef();
+ 
+       if (!isFirstRow && predictorMode != 1)
+         decodeRowN<MCU, N_COMP, true>(outStripe, pred, prevStripe, ht, bs);
+diff --git a/src/librawspeed/decompressors/LJpegDecompressor.h b/src/librawspeed/decompressors/LJpegDecompressor.h
+index a35dd79c..672249c2 100644
+--- a/src/librawspeed/decompressors/LJpegDecompressor.h
++++ b/src/librawspeed/decompressors/LJpegDecompressor.h
+@@ -90,8 +90,7 @@ private:
+ public:
+   LJpegDecompressor(RawImage img, iRectangle2D imgFrame, Frame frame,
+                     std::vector<PerComponentRecipe> rec,
+-                    int numLJpegRowsPerRestartInterval_,
+-                    int predictorMode_,
++                    int numLJpegRowsPerRestartInterval_, int predictorMode_,
+                     Array1DRef<const uint8_t> input);
+ 
+   [[nodiscard]] ByteStream::size_type decode() const;

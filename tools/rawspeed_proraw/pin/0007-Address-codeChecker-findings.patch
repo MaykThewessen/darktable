@@ -1,0 +1,34 @@
+From ed6e667346b1bf41ca1e76bac9b0ee8230ee09b9 Mon Sep 17 00:00:00 2001
+From: Philipp Lutz <philipp.lutz@gmx.de>
+Date: Sun, 19 Apr 2026 14:34:47 +0200
+Subject: [PATCH 07/10] Address codeChecker findings
+
+(cherry picked from commit a167a44f3a5034725be51b941bff7e00e7f751aa)
+---
+ src/librawspeed/decompressors/LJpegDecoder.cpp | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/librawspeed/decompressors/LJpegDecoder.cpp b/src/librawspeed/decompressors/LJpegDecoder.cpp
+index 1e3deb08..31d3b870 100644
+--- a/src/librawspeed/decompressors/LJpegDecoder.cpp
++++ b/src/librawspeed/decompressors/LJpegDecoder.cpp
+@@ -20,6 +20,7 @@
+ */
+ 
+ #include "decompressors/LJpegDecoder.h"
++#include "adt/Array1DRef.h"
+ #include "adt/Casts.h"
+ #include "adt/Invariant.h"
+ #include "adt/Point.h"
+@@ -106,8 +107,9 @@ decodeStandardScan(const ScanSettings& settings, iPoint2D mcuSize,
+   return d.decode();
+ }
+ 
+-void copyDeinterleavedRows(const RawImage& raw, RawImage tmpRaw, uint32_t offX,
+-                           uint32_t offY, uint32_t tileWidth, int widthPack) {
++void copyDeinterleavedRows(const RawImage& raw, const RawImage& tmpRaw,
++                           uint32_t offX, uint32_t offY, uint32_t tileWidth,
++                           int widthPack) {
+   const auto tmpData = tmpRaw->getU16DataAsUncroppedArray2DRef();
+   const auto outData = raw->getU16DataAsUncroppedArray2DRef();
+ 
