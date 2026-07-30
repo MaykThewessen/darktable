@@ -1,0 +1,48 @@
+From 6ffbcd935f21bfc33bd8271f369d56ca079a4f8b Mon Sep 17 00:00:00 2001
+From: Philipp Lutz <philipp.lutz@gmx.de>
+Date: Sun, 19 Apr 2026 14:19:22 +0200
+Subject: [PATCH] Support UniqueCameraModel  Exif tag for DNG
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Blackmagic CinemaDNG files don't include TIFF Make/Model tags — they only have UniqueCameraModel (tag 50708), which is valid per the DNG spec. In decodeMetaDataInternal(), the code called getID() unconditionally.
+
+Instead of calling getID() in a try/catch (which logged a spurious error), check for MAKE+MODEL existence first. If present, call getID() as before. If absent, fall back to UNIQUECAMERAMODEL for both make and model fields — mirroring the approach already used in checkSupportInternal().
+
+(cherry picked from commit a9dbfad873923c802a7c156e83899d5a5df19019)
+(cherry picked from commit 11921a6519258d9fedd3313fc968b2247faf6368)
+---
+ src/librawspeed/decoders/DngDecoder.cpp | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/src/librawspeed/decoders/DngDecoder.cpp b/src/librawspeed/decoders/DngDecoder.cpp
+index ecd11989..ae972d2a 100644
+--- a/src/librawspeed/decoders/DngDecoder.cpp
++++ b/src/librawspeed/decoders/DngDecoder.cpp
+@@ -699,12 +699,20 @@ void DngDecoder::decodeMetaDataInternal(const CameraMetaData* meta) {
+ 
+   TiffID id;
+ 
+-  try {
++  if (mRootIFD->hasEntryRecursive(TiffTag::MAKE) &&
++      mRootIFD->hasEntryRecursive(TiffTag::MODEL)) {
+     id = mRootIFD->getID();
+-  } catch (const RawspeedException& e) {
+-    mRaw->setError(e.what());
+-    // not all dngs have MAKE/MODEL entries,
+-    // will be dealt with by using UNIQUECAMERAMODEL below
++  } else if (mRootIFD->hasEntryRecursive(TiffTag::UNIQUECAMERAMODEL)) {
++    // Not all DNGs have MAKE/MODEL entries (e.g. Blackmagic CinemaDNG).
++    // Fall back to UNIQUECAMERAMODEL for identification.
++    std::string unique =
++        mRootIFD->getEntryRecursive(TiffTag::UNIQUECAMERAMODEL)->getString();
++    if (unique.empty())
++      ThrowRDE("UNIQUECAMERAMODEL is empty");
++    id.make = unique;
++    id.model = unique;
++  } else {
++    ThrowRDE("DNG has neither MAKE/MODEL nor UNIQUECAMERAMODEL");
+   }
+ 
+   // Set the make and model

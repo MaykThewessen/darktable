@@ -1,0 +1,74 @@
+From 36d624c28103be782864f1a0894509d683458f51 Mon Sep 17 00:00:00 2001
+From: Philipp Lutz <philipp.lutz@gmx.de>
+Date: Thu, 30 Jul 2026 19:07:48 +0000
+Subject: [PATCH] Address static-analyzer, sanitizer and fuzzer findings
+
+Three independent fixes surfaced by clang-tidy / the static analyzer and by
+sanitizer + fuzzer runs:
+
+- SimpleTiffDecoder: value-initialize raw/width/height/off/c2 in the
+  constructor instead of leaving them indeterminate until
+  prepareForRawDecoding() runs.
+- AbstractDngDecompressor: include <algorithm> explicitly rather than
+  relying on it arriving transitively.
+- FileReader: give the unique_ptr a plain function-pointer deleter and take
+  the address of std::fclose, and annotate the unix.Stream report as a
+  false positive -- the stream is closed by the unique_ptr deleter on every
+  exit path, which the analyzer does not model.
+
+Origin: darktable-org/rawspeed#963, commit cf87137 ("Address clang-tidy,
+sanitizer and fuzzer findings"). None of these hunks touch LJpeg, so they
+stand on their own; that commit's LJpegDecompressor hunk depends on the
+predictor-mode work and is proposed with it instead.
+---
+ src/librawspeed/decoders/SimpleTiffDecoder.h             | 3 ++-
+ .../decompressors/AbstractDngDecompressor.cpp            | 1 +
+ src/librawspeed/io/FileReader.cpp                        | 9 ++++++---
+ 3 files changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/src/librawspeed/decoders/SimpleTiffDecoder.h b/src/librawspeed/decoders/SimpleTiffDecoder.h
+index 1fa79fdc..e08b5e31 100644
+--- a/src/librawspeed/decoders/SimpleTiffDecoder.h
++++ b/src/librawspeed/decoders/SimpleTiffDecoder.h
+@@ -39,7 +39,8 @@ class SimpleTiffDecoder : public AbstractTiffDecoder {
+ 
+ public:
+   SimpleTiffDecoder(TiffRootIFDOwner&& root, Buffer file)
+-      : AbstractTiffDecoder(std::move(root), file) {}
++      : AbstractTiffDecoder(std::move(root), file), raw(nullptr), width(0),
++        height(0), off(0), c2(0) {}
+ 
+   void prepareForRawDecoding();
+ 
+diff --git a/src/librawspeed/decompressors/AbstractDngDecompressor.cpp b/src/librawspeed/decompressors/AbstractDngDecompressor.cpp
+index b828a4fe..81152d0f 100644
+--- a/src/librawspeed/decompressors/AbstractDngDecompressor.cpp
++++ b/src/librawspeed/decompressors/AbstractDngDecompressor.cpp
+@@ -35,6 +35,7 @@
+ #include "io/ByteStream.h"
+ #include "io/Endianness.h"
+ #include "io/IOException.h"
++#include <algorithm>
+ #include <cstdint>
+ #include <limits>
+ #include <string>
+diff --git a/src/librawspeed/io/FileReader.cpp b/src/librawspeed/io/FileReader.cpp
+index 2378ba4c..79d0f18f 100644
+--- a/src/librawspeed/io/FileReader.cpp
++++ b/src/librawspeed/io/FileReader.cpp
+@@ -53,9 +53,12 @@ FileReader::readFile() const {
+   size_t fileSize = 0;
+ 
+ #if defined(__unix__) || defined(__APPLE__)
+-  auto fclose = [](std::FILE* fp) { std::fclose(fp); };
+-  using file_ptr = std::unique_ptr<FILE, decltype(fclose)>;
+-  file_ptr file(fopen(fileName, "rb"), fclose);
++  using file_ptr = std::unique_ptr<std::FILE, int (*)(std::FILE*)>;
++  // The opened stream is owned by `file`, whose deleter (std::fclose) closes it
++  // on every exit path. The static analyzer does not model the unique_ptr
++  // destructor, so it wrongly reports a leak here.
++  // codechecker_false_positive [unix.Stream] close done by unique_ptr deleter
++  file_ptr file(std::fopen(fileName, "rb"), &std::fclose);
+ 
+   if (file == nullptr)
+     ThrowFIE("Could not open file \"%s\".", fileName);

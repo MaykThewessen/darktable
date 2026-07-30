@@ -1,0 +1,117 @@
+From 2840416e1715a295ba11757e87d997031c4591be Mon Sep 17 00:00:00 2001
+From: Philipp Lutz <philipp.lutz@gmx.de>
+Date: Sun, 19 Apr 2026 16:25:44 +0200
+Subject: [PATCH 08/10] Add more meaningful error message for 12-bit JPG files
+
+Some Blackmagic CinemaDNG files (Pocket Cinema Camera 4K files (3)/(4), Micro Cinema Camera (1)) use SOF1 (Extended Sequential DCT) at 12-bit precision but label tiles as TIFF compression=7 (lossless JPEG). The lossless JPEG decoder hit a DQT marker and threw "Not a valid RAW file."
+
+On libjpeg-turbo 2.1.5, the error is now "Unsupported JPEG data precision 12" (much clearer).
+
+Future work: on systems with libjpeg-turbo 3.0+, we can enable full 12-bit lossy JPEG decoding.
+
+(cherry picked from commit 8e10cee704b021a6a092da142cf0215ea7aab38c)
+---
+ .../decompressors/AbstractDngDecompressor.cpp | 67 +++++++++++++++++++
+ .../decompressors/JpegDecompressor.cpp        |  4 ++
+ 2 files changed, 71 insertions(+)
+
+diff --git a/src/librawspeed/decompressors/AbstractDngDecompressor.cpp b/src/librawspeed/decompressors/AbstractDngDecompressor.cpp
+index b828a4fe..c68044d9 100644
+--- a/src/librawspeed/decompressors/AbstractDngDecompressor.cpp
++++ b/src/librawspeed/decompressors/AbstractDngDecompressor.cpp
+@@ -51,6 +51,64 @@
+ 
+ namespace rawspeed {
+ 
++namespace {
++
++// Some DNG files (e.g. Blackmagic CinemaDNG) use TIFF compression=7
++// (lossless JPEG) but the actual tile data contains lossy DCT JPEG
++// (SOF0/SOF1/SOF2 with DQT). Detect this by scanning the first few
++// JPEG markers in the tile stream.
++[[nodiscard]] bool tileContainsLossyJpeg(const ByteStream& bs) {
++  const auto remaining = bs.getRemainSize();
++  if (remaining < 4)
++    return false;
++
++  // Must start with JPEG SOI marker
++  if (bs.peekByte(0) != 0xFF || bs.peekByte(1) != 0xD8)
++    return false;
++
++  // Scan markers after SOI. Stop after a reasonable number of bytes.
++  const auto limit =
++      std::min(remaining, static_cast<ByteStream::size_type>(1024));
++  ByteStream::size_type pos = 2;
++
++  while (pos + 3 < limit) {
++    if (bs.peekByte(pos) != 0xFF)
++      return false; // Invalid marker - stop scanning
++
++    const uint8_t marker = bs.peekByte(pos + 1);
++
++    // DQT (quantization table) is definitive proof of lossy JPEG
++    if (marker == 0xDB) // DQT
++      return true;
++
++    // SOF0/SOF1/SOF2 = lossy DCT-based JPEG
++    if (marker == 0xC0 || marker == 0xC1 || marker == 0xC2)
++      return true;
++
++    // SOF3 = lossless - this is what compression=7 should be
++    if (marker == 0xC3)
++      return false;
++
++    // SOS = start of scan data - stop scanning
++    if (marker == 0xDA)
++      return false;
++
++    // Skip this marker segment
++    if (pos + 4 > remaining)
++      return false;
++    const auto segLen = static_cast<uint16_t>(
++        (static_cast<uint16_t>(bs.peekByte(pos + 2)) << 8) |
++        static_cast<uint16_t>(bs.peekByte(pos + 3)));
++    if (segLen < 2)
++      return false;
++    pos += 2 + segLen;
++  }
++
++  return false;
++}
++
++} // namespace
++
+ template <> void AbstractDngDecompressor::decompressThread<1>() const noexcept {
+ #ifdef HAVE_OPENMP
+ #pragma omp for schedule(static)
+@@ -116,6 +174,15 @@ template <> void AbstractDngDecompressor::decompressThread<7>() const noexcept {
+   for (const auto& e :
+        Array1DRef(slices.data(), implicit_cast<int>(slices.size()))) {
+     try {
++#ifdef HAVE_JPEG
++      // Some cameras (e.g. Blackmagic CinemaDNG) mislabel lossy DCT JPEG
++      // tiles as compression=7 (lossless JPEG). Detect and redirect.
++      if (tileContainsLossyJpeg(e.bs)) {
++        JpegDecompressor j(e.bs.peekBuffer(e.bs.getRemainSize()), mRaw);
++        j.decode(e.offX, e.offY);
++        continue;
++      }
++#endif
+       LJpegDecoder d(e.bs, mRaw);
+       d.decode(e.offX, e.offY, e.width, e.height,
+                iPoint2D(e.dsc.tileW, e.dsc.tileH), mFixLjpeg);
+diff --git a/src/librawspeed/decompressors/JpegDecompressor.cpp b/src/librawspeed/decompressors/JpegDecompressor.cpp
+index 569bb037..a0a4da39 100644
+--- a/src/librawspeed/decompressors/JpegDecompressor.cpp
++++ b/src/librawspeed/decompressors/JpegDecompressor.cpp
+@@ -139,6 +139,10 @@ void JpegDecompressor::decode(uint32_t offX,
+   if (JPEG_HEADER_OK != jpeg_read_header(&dinfo, static_cast<boolean>(true)))
+     ThrowRDE("Unable to read JPEG header");
+ 
++  if (dinfo.data_precision != 8)
++    ThrowRDE("Lossy JPEG tiles with %d-bit precision are not yet supported.",
++             dinfo.data_precision);
++
+   jpeg_start_decompress(&dinfo);
+   if (dinfo.output_components != static_cast<int>(mRaw->getCpp()))
+     ThrowRDE("Component count doesn't match");

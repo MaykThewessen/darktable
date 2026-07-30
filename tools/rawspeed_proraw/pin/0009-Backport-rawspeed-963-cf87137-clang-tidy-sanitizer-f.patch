@@ -1,0 +1,83 @@
+From a15b9a2ebca98fff395a2a9fb94a65770d01f025 Mon Sep 17 00:00:00 2001
+From: Mayk Thewessen <mayk_12@hotmail.com>
+Date: Sun, 21 Jun 2026 22:15:14 +0200
+Subject: [PATCH 09/10] Backport rawspeed#963 cf87137:
+ clang-tidy/sanitizer/fuzzer fixes
+
+Manually applies upstream PR darktable-org/rawspeed#963 commit cf87137
+onto this v3.6 backport (a raw cherry-pick conflicts: different base
+plus local JPEG XL WIP in AbstractDngDecompressor.cpp).
+
+- LJpegDecompressor.cpp: reject predictor modes outside 1-7 (fuzzer
+  hardening for the widened predictor set)
+- SimpleTiffDecoder.h: initialize raw/width/height/off/c2 in ctor
+- AbstractDngDecompressor.cpp: add missing <algorithm> include
+- FileReader.cpp: typed fn-pointer deleter plus codechecker
+  false-positive marker for unix.Stream
+---
+ src/librawspeed/decoders/SimpleTiffDecoder.h             | 3 ++-
+ .../decompressors/AbstractDngDecompressor.cpp            | 1 +
+ src/librawspeed/decompressors/LJpegDecompressor.cpp      | 3 +++
+ src/librawspeed/io/FileReader.cpp                        | 9 ++++++---
+ 4 files changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/src/librawspeed/decoders/SimpleTiffDecoder.h b/src/librawspeed/decoders/SimpleTiffDecoder.h
+index 1fa79fdc..e08b5e31 100644
+--- a/src/librawspeed/decoders/SimpleTiffDecoder.h
++++ b/src/librawspeed/decoders/SimpleTiffDecoder.h
+@@ -39,7 +39,8 @@ class SimpleTiffDecoder : public AbstractTiffDecoder {
+ 
+ public:
+   SimpleTiffDecoder(TiffRootIFDOwner&& root, Buffer file)
+-      : AbstractTiffDecoder(std::move(root), file) {}
++      : AbstractTiffDecoder(std::move(root), file), raw(nullptr), width(0),
++        height(0), off(0), c2(0) {}
+ 
+   void prepareForRawDecoding();
+ 
+diff --git a/src/librawspeed/decompressors/AbstractDngDecompressor.cpp b/src/librawspeed/decompressors/AbstractDngDecompressor.cpp
+index c68044d9..6ba745b6 100644
+--- a/src/librawspeed/decompressors/AbstractDngDecompressor.cpp
++++ b/src/librawspeed/decompressors/AbstractDngDecompressor.cpp
+@@ -35,6 +35,7 @@
+ #include "io/ByteStream.h"
+ #include "io/Endianness.h"
+ #include "io/IOException.h"
++#include <algorithm>
+ #include <cstdint>
+ #include <limits>
+ #include <string>
+diff --git a/src/librawspeed/decompressors/LJpegDecompressor.cpp b/src/librawspeed/decompressors/LJpegDecompressor.cpp
+index 376ddd3a..57b36f7c 100644
+--- a/src/librawspeed/decompressors/LJpegDecompressor.cpp
++++ b/src/librawspeed/decompressors/LJpegDecompressor.cpp
+@@ -116,6 +116,9 @@ LJpegDecompressor::LJpegDecompressor(RawImage img, iRectangle2D imgFrame_,
+   if (numLJpegRowsPerRestartInterval < 1)
+     ThrowRDE("Number of rows per restart interval must be positives");
+ 
++  if (predictorMode < 1 || predictorMode > 7)
++    ThrowRDE("Unsupported predictor mode: %i", predictorMode);
++
+   if (static_cast<int64_t>(frame.mcu.x) * frame.dim.x >
+           std::numeric_limits<int>::max() ||
+       static_cast<int64_t>(frame.mcu.y) * frame.dim.y >
+diff --git a/src/librawspeed/io/FileReader.cpp b/src/librawspeed/io/FileReader.cpp
+index 2378ba4c..79d0f18f 100644
+--- a/src/librawspeed/io/FileReader.cpp
++++ b/src/librawspeed/io/FileReader.cpp
+@@ -53,9 +53,12 @@ FileReader::readFile() const {
+   size_t fileSize = 0;
+ 
+ #if defined(__unix__) || defined(__APPLE__)
+-  auto fclose = [](std::FILE* fp) { std::fclose(fp); };
+-  using file_ptr = std::unique_ptr<FILE, decltype(fclose)>;
+-  file_ptr file(fopen(fileName, "rb"), fclose);
++  using file_ptr = std::unique_ptr<std::FILE, int (*)(std::FILE*)>;
++  // The opened stream is owned by `file`, whose deleter (std::fclose) closes it
++  // on every exit path. The static analyzer does not model the unique_ptr
++  // destructor, so it wrongly reports a leak here.
++  // codechecker_false_positive [unix.Stream] close done by unique_ptr deleter
++  file_ptr file(std::fopen(fileName, "rb"), &std::fclose);
+ 
+   if (file == nullptr)
+     ThrowFIE("Could not open file \"%s\".", fileName);

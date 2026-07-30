@@ -1,0 +1,31 @@
+From 09dceddbfe629e03f76e397943ef4526f586408c Mon Sep 17 00:00:00 2001
+From: Philipp Lutz <philipp.lutz@gmx.de>
+Date: Thu, 30 Jul 2026 18:59:55 +0000
+Subject: [PATCH 7/7] LJpeg: validate predictor mode range
+
+Reject predictor modes outside 1..7 in the LJpegDecompressor constructor
+instead of relying on callers to pre-validate.
+
+Origin: darktable-org/rawspeed#963, commit cf87137 ("Address clang-tidy,
+sanitizer and fuzzer findings"). Only the LJpegDecompressor hunk is taken
+here, because it depends on the predictorMode member introduced earlier in
+this series; the remaining hunks of that commit are static-analyzer fixes
+unrelated to LJpeg and are proposed separately.
+---
+ src/librawspeed/decompressors/LJpegDecompressor.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/librawspeed/decompressors/LJpegDecompressor.cpp b/src/librawspeed/decompressors/LJpegDecompressor.cpp
+index e0a6d769..f62b5ff2 100644
+--- a/src/librawspeed/decompressors/LJpegDecompressor.cpp
++++ b/src/librawspeed/decompressors/LJpegDecompressor.cpp
+@@ -116,6 +116,9 @@ LJpegDecompressor::LJpegDecompressor(RawImage img, iRectangle2D imgFrame_,
+   if (numLJpegRowsPerRestartInterval < 1)
+     ThrowRDE("Number of rows per restart interval must be positives");
+ 
++  if (predictorMode < 1 || predictorMode > 7)
++    ThrowRDE("Unsupported predictor mode: %i", predictorMode);
++
+   if (static_cast<int64_t>(frame.mcu.x) * frame.dim.x >
+           std::numeric_limits<int>::max() ||
+       static_cast<int64_t>(frame.mcu.y) * frame.dim.y >
