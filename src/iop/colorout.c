@@ -1208,6 +1208,8 @@ static void _build_transforms(dt_iop_colorout_data_t *const d,
                  ->profile;
     b->type = DT_COLORSPACE_SRGB;
     b->filename = "";
+    // the sRGB replacement is not encoded as PQ or HLG
+    d->hdr_transfer = DT_HDR_NONE;
     if(req->clip)
     {
       dt_control_log(_("missing softproof profile has been replaced by sRGB!"));
@@ -1254,6 +1256,7 @@ static void _build_transforms(dt_iop_colorout_data_t *const d,
     b->type = DT_COLORSPACE_SRGB;
     b->filename = "";
     b->profile = output;
+    d->hdr_transfer = DT_HDR_NONE;
 
     if(ink || !_matrix_path(d, output, proof, intent, bpc, force_lcms2))
     {

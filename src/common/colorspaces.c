@@ -329,6 +329,12 @@ static cmsHPROFILE _create_lcms_profile(const char *desc,
   return profile;
 }
 
+// The PQ and HLG curves below only build the ICC shapers of the lcms profiles
+// that are embedded in exports and handed to lcms2. They follow the ICC
+// convention, 1.0 is the PQ peak of 10000 nits and HLG is scene light without
+// the OOTF. The pixelpipe uses common/hdr-transfer.h instead, where 1.0 is
+// the 203 nits reference white.
+
 // https://www.itu.int/dms_pubrec/itu-r/rec/bt/R-REC-BT.2100-2-201807-I!!PDF-F.pdf
 // Perceptual Quantization / SMPTE standard ST.2084
 static double _PQ_fct(double x)
