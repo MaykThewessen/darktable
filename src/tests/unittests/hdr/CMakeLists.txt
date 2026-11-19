@@ -1,5 +1,5 @@
 add_cmocka_test(test_hdr_transfer
-                SOURCES test-hdr-transfer.c
+                SOURCES test_hdr_transfer.c
                 LINK_LIBRARIES lib_darktable cmocka)
 
 # dt_imageio_pq_light_level() lives in lib_darktable

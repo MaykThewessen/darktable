@@ -21,7 +21,10 @@
    fp32_div() for every division by a runtime value: the PQ curve amplifies
    relative errors by 1/m1 (about 6.3), so the relaxed OpenCL division and
    native functions give visible CPU vs OpenCL differences. Divisions of two
-   constants are folded by the compiler and stay plain. */
+   constants are folded by the compiler and stay plain.
+
+   The functions are odd, f(-x) = -f(x), and do not clip at signal 1.0;
+   NaN gives 0. See the CPU header for the derivations. */
 
 #pragma once
 
@@ -46,14 +49,17 @@
 #define DT_HDR_HLG_B 0.28466892f
 #define DT_HDR_HLG_C 0.55991073f
 
+/* the PQ decode clamps the signal short of its pole at 1.992 */
+#define DT_HDR_PQ_MAX_SIGNAL 1.98f
+
 #define DT_HDR_PQ_BLACK_SCALE 1368071.625f
 #define DT_HDR_PQ_BLACK_SCALE_LO -0.040281184f
 #define DT_HDR_PQ_DARK_SIGNAL 1e-4f
 
-/* see the CPU header for the derivation */
 static inline float dt_hdr_pq_decode(const float signal)
 {
-  const float e = clipf(signal);
+  // fmax() maps NaN to 0
+  const float e = fmin(fmax(fabs(signal), 0.0f), DT_HDR_PQ_MAX_SIGNAL);
   const int dark = e < DT_HDR_PQ_DARK_SIGNAL;
   const float l = dark
     ? log1p(fmax(fma(e, DT_HDR_PQ_BLACK_SCALE, -1.0f) + e * DT_HDR_PQ_BLACK_SCALE_LO, -0.5f))
@@ -62,30 +68,33 @@ static inline float dt_hdr_pq_decode(const float signal)
   const float n = fmax(dark ? DT_HDR_PQ_C1 * x : (1.0f - DT_HDR_PQ_C1) + x, 0.0f);
   const float d = dark ? (DT_HDR_PQ_C2 - DT_HDR_PQ_C3 * DT_HDR_PQ_C1) - (DT_HDR_PQ_C3 * DT_HDR_PQ_C1) * x
                        : (1.0f - DT_HDR_PQ_C1) - DT_HDR_PQ_C3 * x;
-  return (DT_HDR_PQ_PEAK_NITS / DT_HDR_REFERENCE_WHITE_NITS)
-    * pow(fp32_div(n, d), 1.0f / DT_HDR_PQ_M1);
+  return copysign((DT_HDR_PQ_PEAK_NITS / DT_HDR_REFERENCE_WHITE_NITS)
+                  * pow(fp32_div(n, d), 1.0f / DT_HDR_PQ_M1), signal);
 }
 
 static inline float dt_hdr_pq_encode(const float linear)
 {
-  const float l = clipf(linear * (DT_HDR_REFERENCE_WHITE_NITS / DT_HDR_PQ_PEAK_NITS));
+  // fmax() maps NaN to 0, fmin() keeps p finite for infinite linear
+  const float l = fmin(fmax(fabs(linear), 0.0f), FLT_MAX)
+    * (DT_HDR_REFERENCE_WHITE_NITS / DT_HDR_PQ_PEAK_NITS);
   const float p = pow(l, DT_HDR_PQ_M1);
-  return pow(fp32_div(DT_HDR_PQ_C1 + DT_HDR_PQ_C2 * p, 1.0f + DT_HDR_PQ_C3 * p),
-             DT_HDR_PQ_M2);
+  const float q = (DT_HDR_PQ_C1 - 1.0f)
+    * (fp32_div(1.0f + 1.0f / DT_HDR_PQ_C3, 1.0f + DT_HDR_PQ_C3 * p) - 1.0f / DT_HDR_PQ_C3);
+  return copysign(exp(DT_HDR_PQ_M2 * log1p(q)), linear);
 }
 
 static inline float dt_hdr_hlg_decode(const float signal)
 {
-  const float e = clipf(signal);
-  return e <= 0.5f ? fp32_div(e * e, 3.0f)
-    : fp32_div(exp(fp32_div(e - DT_HDR_HLG_C, DT_HDR_HLG_A)) + DT_HDR_HLG_B, 12.0f);
+  const float e = fmax(fabs(signal), 0.0f);
+  return copysign(e <= 0.5f ? fp32_div(e * e, 3.0f)
+    : fp32_div(exp(fp32_div(e - DT_HDR_HLG_C, DT_HDR_HLG_A)) + DT_HDR_HLG_B, 12.0f), signal);
 }
 
 static inline float dt_hdr_hlg_encode(const float scene)
 {
-  const float e = fmax(scene, 0.0f);
-  return fmin(e <= 1.0f / 12.0f ? sqrt(3.0f * e)
-    : DT_HDR_HLG_A * log(12.0f * e - DT_HDR_HLG_B) + DT_HDR_HLG_C, 1.0f);
+  const float e = fmax(fabs(scene), 0.0f);
+  return copysign(e <= 1.0f / 12.0f ? sqrt(3.0f * e)
+    : DT_HDR_HLG_A * log(12.0f * e - DT_HDR_HLG_B) + DT_HDR_HLG_C, scene);
 }
 
 static inline float dt_hdr_hlg_luminance(const float rgb[3], const int transfer)
@@ -97,7 +106,8 @@ static inline float dt_hdr_hlg_luminance(const float rgb[3], const int transfer)
 }
 
 /* takes display light of luminance y to HLG scene light: the inverse of
-   the BT.2100 OOTF */
+   the BT.2100 OOTF. the gain diverges at y = 0; that pixel, and NaN, go
+   to black */
 static inline float dt_hdr_hlg_scene_scale(const float y)
 {
   const float inv_gamma = 1.0f / DT_HDR_HLG_SYSTEM_GAMMA;
@@ -107,6 +117,7 @@ static inline float dt_hdr_hlg_scene_scale(const float y)
     : 0.0f;
 }
 
+/* the HLG OOTF gain uses |Y|, so rgb and -rgb map to opposite values */
 static inline void dt_hdr_decode(float rgb[3], const int transfer)
 {
   if(transfer == DT_HDR_PQ)
@@ -116,7 +127,7 @@ static inline void dt_hdr_decode(float rgb[3], const int transfer)
   else if(transfer != DT_HDR_NONE)
   {
     for(int c = 0; c < 3; c++) rgb[c] = dt_hdr_hlg_decode(rgb[c]);
-    const float y = dt_hdr_hlg_luminance(rgb, transfer);
+    const float y = fabs(dt_hdr_hlg_luminance(rgb, transfer));
     const float scale = (DT_HDR_HLG_PEAK_NITS / DT_HDR_REFERENCE_WHITE_NITS)
       * pow(y, DT_HDR_HLG_SYSTEM_GAMMA - 1.0f);
     for(int c = 0; c < 3; c++) rgb[c] *= scale;
@@ -131,8 +142,7 @@ static inline void dt_hdr_encode(float rgb[3], const int transfer)
   }
   else if(transfer != DT_HDR_NONE)
   {
-    for(int c = 0; c < 3; c++) rgb[c] = fmax(rgb[c], 0.0f);
-    const float scale = dt_hdr_hlg_scene_scale(dt_hdr_hlg_luminance(rgb, transfer));
+    const float scale = dt_hdr_hlg_scene_scale(fabs(dt_hdr_hlg_luminance(rgb, transfer)));
     for(int c = 0; c < 3; c++) rgb[c] = dt_hdr_hlg_encode(rgb[c] * scale);
   }
 }
