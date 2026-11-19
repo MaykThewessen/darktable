@@ -1841,7 +1841,12 @@ void commit_params(dt_iop_module_t *self,
   {
     const dt_colorspaces_color_profile_t *profile =
       dt_colorspaces_get_profile(type, d->filename, DT_PROFILE_DIRECTION_IN);
-    if(profile) d->input = profile->profile;
+    if(profile)
+    {
+      d->input = profile->profile;
+      // only the PQ or HLG profile itself is decoded, not a fallback for it
+      d->hdr_transfer = dt_colorspaces_hdr_transfer(type);
+    }
   }
 
   if(!d->input && type != DT_COLORSPACE_SRGB)
@@ -1869,7 +1874,6 @@ void commit_params(dt_iop_module_t *self,
     return;
   }
 
-  d->hdr_transfer = dt_colorspaces_hdr_transfer(type);
   if(d->hdr_transfer)
   {
     cmsHPROFILE linear = dt_colorspaces_linearize_profile(d->input);
@@ -1980,6 +1984,7 @@ void commit_params(dt_iop_module_t *self,
     d->input = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC709, "",
                                           DT_PROFILE_DIRECTION_IN)->profile;
     d->clear_input = FALSE;
+    d->hdr_transfer = DT_HDR_NONE;
     if(dt_colorspaces_get_matrix_from_input_profile(d->input, d->cmatrix,
                                                     d->lut[0], d->lut[1], d->lut[2],
                                                     LUT_SAMPLES))
@@ -2169,26 +2174,42 @@ void reload_defaults(dt_iop_module_t *self)
 
   // some file formats like jpeg can have an embedded color profile
   // currently we only support jpeg, j2k, tiff, png, avif, and heif
-  dt_image_t *img = dt_image_cache_get(self->dev->image_storage.id, 'w');
-
+  const dt_imgid_t imgid = self->dev->image_storage.id;
   char filename[PATH_MAX] = { 0 };
   gboolean from_cache = TRUE;
-  dt_image_full_path(img->id, filename, sizeof(filename), &from_cache);
+  dt_image_full_path(imgid, filename, sizeof(filename), &from_cache);
   const char *extension = strrchr(filename, '.');
-  if(extension && !g_ascii_strcasecmp(extension, ".png"))
+
+  /* PNG cICP has priority over ICC, including after the ICC was cached,
+     so it is read on every call. Read it before taking the write lock. */
+  const gboolean is_png = extension && !g_ascii_strcasecmp(extension, ".png");
+  dt_colorspaces_cicp_t png_cicp;
+  uint8_t *png_profile = NULL;
+  const int png_profile_size = is_png
+    ? dt_imageio_png_read_profile(filename, &png_profile, &png_cicp)
+    : 0;
+
+#ifdef HAVE_LIBJXL
+  /* A synthesized ICC shaper cannot express absolute PQ luminance or the
+     RGB-dependent HLG OOTF. Prefer structured HDR metadata when present. */
+  const dt_colorspaces_color_profile_type_t jxl_hdr
+    = extension && !g_ascii_strcasecmp(extension, ".jxl")
+    ? dt_imageio_jpegxl_read_hdr_profile(filename)
+    : DT_COLORSPACE_NONE;
+#endif
+
+  dt_image_t *img = dt_image_cache_get(imgid, 'w');
+
+  if(is_png)
   {
-    /* PNG cICP has priority over ICC, including after the ICC was cached. */
-    dt_colorspaces_cicp_t cicp;
-    uint8_t *profile = NULL;
-    const int size = dt_imageio_png_read_profile(filename, &profile, &cicp);
     if(!img->profile)
     {
-      img->profile = profile;
-      img->profile_size = size;
+      img->profile = png_profile;
+      img->profile_size = png_profile_size;
     }
     else
-      g_free(profile);
-    color_profile = dt_colorspaces_cicp_to_type(&cicp, filename);
+      g_free(png_profile);
+    color_profile = dt_colorspaces_cicp_to_type(&png_cicp, filename);
     if(color_profile == DT_COLORSPACE_NONE && img->profile_size > 0)
       color_profile = DT_COLORSPACE_EMBEDDED_ICC;
   }
@@ -2268,14 +2289,7 @@ void reload_defaults(dt_iop_module_t *self)
   }
 
 #ifdef HAVE_LIBJXL
-  /* A synthesized ICC shaper cannot express absolute PQ luminance or the
-     RGB-dependent HLG OOTF. Prefer structured HDR metadata when present. */
-  const char *ext = strrchr(filename, '.');
-  if(ext && !g_ascii_strcasecmp(ext, ".jxl"))
-  {
-    const dt_colorspaces_color_profile_type_t hdr = dt_imageio_jpegxl_read_hdr_profile(filename);
-    if(hdr != DT_COLORSPACE_NONE) color_profile = hdr;
-  }
+  if(jxl_hdr != DT_COLORSPACE_NONE) color_profile = jxl_hdr;
 #endif
 
   // We'll update the input profile hint with information on the
