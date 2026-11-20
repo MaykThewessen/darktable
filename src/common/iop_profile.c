@@ -75,9 +75,6 @@ static void _transform_hdr_lcms(cmsHTRANSFORM xform,
                                 const int width, const int height,
                                 const int hdr_from, const int hdr_to)
 {
-  size_t padded_size = 0;
-  float *scratchlines = hdr_from ? dt_alloc_perthread_float(4 * width, &padded_size) : NULL;
-  if(hdr_from && !scratchlines) return;
   DT_OMP_FOR()
   for(int y = 0; y < height; y++)
   {
@@ -86,19 +83,15 @@ static void _transform_hdr_lcms(cmsHTRANSFORM xform,
     float *const out = image_out + offset;
     if(hdr_from)
     {
-      float *const scratch = dt_get_perthread(scratchlines, padded_size);
-      for(int x = 0; x < width; x++)
-      {
-        copy_pixel(scratch + 4*x, in + 4*x);
-        dt_hdr_decode(scratch + 4*x, hdr_from);
-      }
-      in = scratch;
+      // decode into the output row, lcms2 transforms 4-float pixels in place
+      if(in != out) memcpy(out, in, sizeof(float) * 4 * width);
+      for(int x = 0; x < width; x++) dt_hdr_decode(out + 4*x, hdr_from);
+      in = out;
     }
     cmsDoTransform(xform, in, out, width);
     if(hdr_to)
       for(int x = 0; x < width; x++) dt_hdr_encode(out + 4*x, hdr_to);
   }
-  dt_free_align(scratchlines);
 }
 
 static void _transform_from_to_rgb_lab_lcms2(const float *const image_in,
@@ -170,7 +163,13 @@ static void _transform_from_to_rgb_lab_lcms2(const float *const image_in,
     output_format = TYPE_RGBA_FLT;
   }
 
-  xform = cmsCreateTransform(input_profile, input_format, output_profile, output_format, intent, cmsFLAGS_COPY_ALPHA);
+  if(rgb_profile)
+    xform = cmsCreateTransform(input_profile, input_format, output_profile, output_format,
+                               intent, cmsFLAGS_COPY_ALPHA);
+  else
+    dt_print(DT_DEBUG_ALWAYS,
+             "[_transform_from_to_rgb_lab_lcms2] cannot linearize HDR profile `%s'",
+             dt_colorspaces_get_name(type, filename));
 
   if(xform)
     _transform_hdr_lcms(xform, image_in, image_out, width, height,
@@ -405,6 +404,23 @@ static inline void _transform_matrix_rgb
   dt_colormatrix_t product, matrix;
   dt_colormatrix_mul(product, profile_info_to->matrix_out, profile_info_from->matrix_in);
   transpose_3xSSE(product, matrix);
+
+  // both sides linear: the matrix alone
+  if(!profile_info_from->nonlinearlut && !profile_info_to->nonlinearlut
+     && !dt_colorspaces_hdr_transfer(profile_info_from->type)
+     && !dt_colorspaces_hdr_transfer(profile_info_to->type))
+  {
+    DT_OMP_FOR(shared(matrix))
+    for(size_t k = 0; k < npixels; k++)
+    {
+      dt_aligned_pixel_t rgb;
+      dt_apply_transposed_color_matrix(image_in + 4*k, matrix, rgb);
+      rgb[3] = image_in[4*k+3];
+      copy_pixel(image_out + 4*k, rgb);
+    }
+    return;
+  }
+
   DT_OMP_FOR(shared(matrix))
   for(size_t k = 0; k < npixels; k++)
   {
