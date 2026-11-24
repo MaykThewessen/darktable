@@ -218,19 +218,6 @@ static void _rotated_primary_to_display_RGB
   for_each_channel(c) display_RGB[c] = scale * (RGB[c] + display_offset);
 }
 
-static void _apply_trc_if_nonlinear(const dt_iop_order_iccprofile_info_t *display_profile,
-                                    const dt_aligned_pixel_t linear_RGB,
-                                    dt_aligned_pixel_t RGB)
-{
-  // Apply tone response curve if any
-  if(display_profile->nonlinearlut)
-    dt_ioppr_apply_trc(linear_RGB, RGB, display_profile->lut_out,
-                       display_profile->unbounded_coeffs_out,
-                       display_profile->lutsize);
-  else
-    copy_pixel(RGB, linear_RGB);
-}
-
 static void _paint_hue_slider(const dt_iop_order_iccprofile_info_t *work_profile,
                               const dt_iop_order_iccprofile_info_t *display_profile,
                               const dt_iop_order_iccprofile_info_t *sRGB_profile,
@@ -248,7 +235,7 @@ static void _paint_hue_slider(const dt_iop_order_iccprofile_info_t *work_profile
     _rotated_primary_to_display_RGB(work_profile, display_profile,
                                     sRGB_profile, primary_index, angle, 0.4f,
                                     linear_RGB);
-    _apply_trc_if_nonlinear(display_profile, linear_RGB, RGB);
+    dt_ioppr_encode_rgb(linear_RGB, RGB, display_profile);
     dt_bauhaus_slider_set_stop(slider, stop, RGB[0], RGB[1], RGB[2]);
   }
   gtk_widget_queue_draw(GTK_WIDGET(slider));
@@ -280,7 +267,7 @@ static void _paint_purity_slider(const dt_iop_order_iccprofile_info_t *work_prof
     // primary. Not super accurate (since the display can't represent the Rec.2020 primaries)
     // but gives an idea of the effect of the purity adjustment.
     for_each_channel(c) stop_RGB[c] = 1.f - t + t * linear_RGB[c];
-    _apply_trc_if_nonlinear(display_profile, stop_RGB, RGB);
+    dt_ioppr_encode_rgb(stop_RGB, RGB, display_profile);
     dt_bauhaus_slider_set_stop(purity_slider, stop, RGB[0], RGB[1], RGB[2]);
   }
   gtk_widget_queue_draw(GTK_WIDGET(purity_slider));

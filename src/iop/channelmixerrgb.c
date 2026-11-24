@@ -3092,10 +3092,7 @@ void gui_post_expose(dt_iop_module_t *self,
     cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
 
     dt_aligned_pixel_t RGB;
-    dt_ioppr_lab_to_rgb_matrix(g->checker->values[k].Lab, RGB,
-                               work_profile->matrix_out_transposed, work_profile->lut_out,
-                               work_profile->unbounded_coeffs_out, work_profile->lutsize,
-                               work_profile->nonlinearlut);
+    dt_ioppr_lab_to_rgb(g->checker->values[k].Lab, RGB, work_profile);
 
     cairo_set_source_rgba(cr, RGB[0], RGB[1], RGB[2], 1.);
     cairo_arc(cr, new_center.x, new_center.y,
@@ -3746,11 +3743,7 @@ static void _convert_GUI_colors(const dt_iop_channelmixer_rgb_params_t *p,
     dt_aligned_pixel_t XYZ;
     if(work_profile)
     {
-      dt_ioppr_rgb_matrix_to_xyz(LMS, XYZ, work_profile->matrix_in_transposed,
-                                 work_profile->lut_in,
-                                 work_profile->unbounded_coeffs_in,
-                                 work_profile->lutsize,
-                                 work_profile->nonlinearlut);
+      dt_ioppr_rgb_to_xyz(LMS, XYZ, work_profile);
       dt_XYZ_to_Rec709_D65(XYZ, RGB);
 
       // normalize with hue-preserving method (sort-of) to prevent
@@ -4893,6 +4886,9 @@ void gui_init(dt_iop_module_t *self)
 
   g->temperature = dt_bauhaus_slider_from_params(self, N_("temperature"));
   dt_bauhaus_slider_set_soft_range(g->temperature, 3000., 7000.);
+  // 1 mired per step: equal steps in kelvin look too large at low temperatures
+  // and too small at high ones
+  dt_bauhaus_slider_set_step_reciprocal(g->temperature, 1e-6f);
   dt_bauhaus_slider_set_digits(g->temperature, 0);
   dt_bauhaus_slider_set_format(g->temperature, " K");
   _paint_temperature_background(self);

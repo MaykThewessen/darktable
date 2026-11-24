@@ -322,12 +322,7 @@ static void picker_scale(const float *const in,
     {
       const float val
           = (work_profile)
-            ? dt_ioppr_get_rgb_matrix_luminance(in,
-                                                work_profile->matrix_in,
-                                                work_profile->lut_in,
-                                                work_profile->unbounded_coeffs_in,
-                                                work_profile->lutsize,
-                                                work_profile->nonlinearlut)
+            ? dt_ioppr_rgb_luminance(in, work_profile)
             : dt_camera_rgb_luminance(in);
       if(p->compensate_middle_grey && work_profile)
       {
@@ -517,12 +512,7 @@ static inline int _add_node_from_picker
 
   if(p->curve_autoscale == DT_S_SCALE_AUTOMATIC_RGB)
     val = (work_profile)
-           ? dt_ioppr_get_rgb_matrix_luminance(in,
-                                               work_profile->matrix_in,
-                                               work_profile->lut_in,
-                                               work_profile->unbounded_coeffs_in,
-                                               work_profile->lutsize,
-                                               work_profile->nonlinearlut)
+           ? dt_ioppr_rgb_luminance(in, work_profile)
            : dt_camera_rgb_luminance(in);
   else
     val = in[ch];
@@ -681,11 +671,14 @@ static void _area_scrolled_callback(GtkEventControllerScroll *controller,
 
       gtk_widget_queue_draw(GTK_WIDGET(g->area));
     }
+
+    return;
   }
 
   // if autoscale is on: do not modify g and b curves
   if((p->curve_autoscale != DT_S_SCALE_MANUAL_RGB)
      && g->channel != DT_IOP_RGBCURVE_R)
+    return;
 
   if(g->selected < 0) return;
 

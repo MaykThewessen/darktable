@@ -58,6 +58,7 @@ FILE(GLOB SOURCE_FILES
   "common/grouping.c"
   "common/guided_filter.c"
   "common/hdr_alignment.cc"
+  "common/hdr_viewer.c"
   "common/heal.c"
   "common/histogram.c"
   "common/history.c"
@@ -528,6 +529,20 @@ if(USE_HEIF)
     else()
       set(libheif_FOUND NOTFOUND)
     endif()
+  endif()
+endif()
+
+# Reset on every configure so a stale value cannot keep the module enabled
+# when USE_ULTRAHDR is turned off or libuhdr disappears.
+set(UltraHDR_FOUND OFF CACHE INTERNAL "")
+if(USE_ULTRAHDR)
+  # libultrahdr has no CMake CONFIG package, so locate it via pkg-config.
+  # NOTE: the pkg-config module and link name are "libuhdr" (NOT "libultrahdr").
+  find_package(PkgConfig)
+  if(PkgConfig_FOUND)
+    # pkg_check_modules() stores UltraHDR_FOUND in the cache itself, which
+    # src/imageio/format/CMakeLists.txt reads to gate the module.
+    pkg_check_modules(UltraHDR IMPORTED_TARGET libuhdr)
   endif()
 endif()
 

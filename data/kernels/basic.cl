@@ -954,7 +954,7 @@ remosaic_and_replace(read_only image2d_t input,
 
   const float corrections[4] = { center.x * wb[0], center.y * wb[1], center.z * wb[2], 0.0f};
   const float correction = fmax(corrections[c], 0.0f);
-  write_imagef(output, (int2)(j, i), (float4)(mix(pix_in, correction, opacity), 0.0f, 0.0f, 0.0f));
+  write_imagef(output, (int2)(j, i), (float4)(dt_mix(pix_in, correction, opacity), 0.0f, 0.0f, 0.0f));
 }
 
 kernel void
@@ -968,19 +968,20 @@ box_blur_5x5(read_only image2d_t in,
 
   if(x >= width || y >= height) return;
 
-  float4 acc = 0.f;
+  // like dt_box_mean() on the CPU, average only the pixels inside the image
+  // instead of repeating the edge ones
+  const int row_min = max(y - 2, 0);
+  const int row_max = min(y + 2, height - 1);
+  const int col_min = max(x - 2, 0);
+  const int col_max = min(x + 2, width - 1);
 
-  for(int ii = -2; ii < 3; ++ii)
-  {
-    for(int jj = -2; jj < 3; ++jj)
-    {
-      const int row = clamp(y + ii, 0, height - 1);
-      const int col = clamp(x + jj, 0, width - 1);
+  float4 acc = 0.f;
+  for(int row = row_min; row <= row_max; ++row)
+    for(int col = col_min; col <= col_max; ++col)
       acc += fmax(0.0f, Areadpixel(in, col, row));
-    }
-  }
-  acc *= 0.04f;
-  write_imagef(out, (int2)(x, y), acc);
+
+  const int hits = (row_max - row_min + 1) * (col_max - col_min + 1);
+  write_imagef(out, (int2)(x, y), fp32_div_4(acc, (float4)hits));
 }
 
 
@@ -2491,8 +2492,9 @@ static inline void _lens_grid_sample(global const float *grid, const int x, cons
 {
   const int i = x / step;
   const int j = y / step;
-  const float tx = (float)(x - i * step) / (float)step;
-  const float ty = (float)(y - j * step) / (float)step;
+  // for some steps like 3 we need a precise division
+  const float tx = fp32_div((float)(x - i * step), (float)step);
+  const float ty = fp32_div((float)(y - j * step), (float)step);
   global const float *p00 = grid + (j * gwidth + i) * stride;
   global const float *p01 = p00 + gwidth * stride;
   for(int n = 0; n < count; n++)
@@ -2506,7 +2508,10 @@ static inline void _lens_grid_sample(global const float *grid, const int x, cons
 /* lens plugin: a lensfun coordinate relative to the input, held inside it as
    in the CPU path of src/iop/lens.cc. Coordinates past the edge sample the
    edge pixel there; mirroring the taps alone would reflect them back into the
-   image. fmin() and fmax() also map NaN to an edge as the CPU path does. */
+   image.
+   Using fmin() and fmax() to map NaN to an edge (as the CPU path does) is not
+   safe as this depends on compiler flags.
+*/
 static inline float _lens_coord(const float v, const int offset, const int size)
 {
   return fmax(fmin(v - (float)offset, (float)size - 1.0f), 0.0f);
@@ -2628,7 +2633,7 @@ lens_distort_bicubic (read_only image2d_t in,
 
   float rx, ry;
   int tx, ty;
-  float sum, weight;
+  float sum;
   float2 sum2;
   float ppi[6];
   _lens_grid_sample(pi, x, y, step, gwidth, 6, 6, ppi);
@@ -2653,7 +2658,6 @@ lens_distort_bicubic (read_only image2d_t in,
   ty = floor(ry);
 
   sum = 0.0f;
-  weight = 0.0f;
   for(int jj = 1 - kwidth; jj <= kwidth; jj++)
     for(int ii= 1 - kwidth; ii <= kwidth; ii++)
   {
@@ -2665,9 +2669,8 @@ lens_distort_bicubic (read_only image2d_t in,
     float w = wx * wy;
 
     sum += Areadpixel(in, clip_mirror(i, iwidth-1), clip_mirror(j, iheight-1)).x * w;
-    weight += w;
   }
-  pixel.x = sum/weight;
+  pixel.x = sum;
 
   rx = _lens_coord(ppi[2], roi_in_x, iwidth);
   ry = _lens_coord(ppi[3], roi_in_y, iheight);
@@ -2675,7 +2678,6 @@ lens_distort_bicubic (read_only image2d_t in,
   ty = floor(ry);
 
   sum2 = (float2)0.0f;
-  weight = 0.0f;
   for(int jj = 1 - kwidth; jj <= kwidth; jj++)
     for(int ii= 1 - kwidth; ii <= kwidth; ii++)
   {
@@ -2687,9 +2689,8 @@ lens_distort_bicubic (read_only image2d_t in,
     float w = wx * wy;
 
     sum2 += Areadpixel(in, clip_mirror(i, iwidth-1), clip_mirror(j, iheight-1)).yw * w;
-    weight += w;
   }
-  pixel.yw = sum2/weight;
+  pixel.yw = sum2;
 
   rx = _lens_coord(ppi[4], roi_in_x, iwidth);
   ry = _lens_coord(ppi[5], roi_in_y, iheight);
@@ -2697,7 +2698,6 @@ lens_distort_bicubic (read_only image2d_t in,
   ty = floor(ry);
 
   sum = 0.0f;
-  weight = 0.0f;
   for(int jj = 1 - kwidth; jj <= kwidth; jj++)
     for(int ii= 1 - kwidth; ii <= kwidth; ii++)
   {
@@ -2709,9 +2709,8 @@ lens_distort_bicubic (read_only image2d_t in,
     float w = wx * wy;
 
     sum += Areadpixel(in, clip_mirror(i, iwidth-1), clip_mirror(j, iheight-1)).z * w;
-    weight += w;
   }
-  pixel.z = sum/weight;
+  pixel.z = sum;
 
   pixel = all(isfinite(pixel.xyz)) ? pixel : (float4)0.0f;
   write_ipixel(out, (int2)(x, y), pixel);
@@ -2784,7 +2783,9 @@ lens_distort_lanczos2 (read_only image2d_t in,
     sum += Areadpixel(in, clip_mirror(i, iwidth-1), clip_mirror(j, iheight-1)).x * w;
     weight += w;
   }
-  pixel.x = sum/weight;
+  // we also do so in CPU code - multiply by 1/norm - let's agree on one way
+  weight = fp32_div(1.0f, weight);
+  pixel.x = sum * weight;
 
 
   rx = _lens_coord(ppi[2], roi_in_x, iwidth);
@@ -2807,7 +2808,8 @@ lens_distort_lanczos2 (read_only image2d_t in,
     sum2 += Areadpixel(in, clip_mirror(i, iwidth-1), clip_mirror(j, iheight-1)).yw * w;
     weight += w;
   }
-  pixel.yw = sum2/weight;
+  weight = fp32_div(1.0f, weight);
+  pixel.yw = sum2 * weight;
 
   rx = _lens_coord(ppi[4], roi_in_x, iwidth);
   ry = _lens_coord(ppi[5], roi_in_y, iheight);
@@ -2829,7 +2831,8 @@ lens_distort_lanczos2 (read_only image2d_t in,
     sum += Areadpixel(in, clip_mirror(i, iwidth-1), clip_mirror(j, iheight-1)).z * w;
     weight += w;
   }
-  pixel.z = sum/weight;
+  weight = fp32_div(1.0f, weight);
+  pixel.z = sum * weight;
 
   pixel = all(isfinite(pixel.xyz)) ? pixel : (float4)0.0f;
   write_ipixel(out, (int2)(x, y), pixel);
@@ -2892,7 +2895,8 @@ lens_distort_lanczos3 (read_only image2d_t in, write_only image2d_t out, const i
     sum += Areadpixel(in, clip_mirror(i, iwidth-1), clip_mirror(j, iheight-1)).x * w;
     weight += w;
   }
-  pixel.x = sum/weight;
+  weight = fp32_div(1.0f, weight);
+  pixel.x = sum * weight;
 
   rx = _lens_coord(ppi[2], roi_in_x, iwidth);
   ry = _lens_coord(ppi[3], roi_in_y, iheight);
@@ -2914,7 +2918,8 @@ lens_distort_lanczos3 (read_only image2d_t in, write_only image2d_t out, const i
     sum2 += Areadpixel(in, clip_mirror(i, iwidth-1), clip_mirror(j, iheight-1)).yw * w;
     weight += w;
   }
-  pixel.yw = sum2/weight;
+  weight = fp32_div(1.0f, weight);
+  pixel.yw = sum2 * weight;
 
   rx = _lens_coord(ppi[4], roi_in_x, iwidth);
   ry = _lens_coord(ppi[5], roi_in_y, iheight);
@@ -2936,7 +2941,8 @@ lens_distort_lanczos3 (read_only image2d_t in, write_only image2d_t out, const i
     sum += Areadpixel(in, clip_mirror(i, iwidth-1), clip_mirror(j, iheight-1)).z * w;
     weight += w;
   }
-  pixel.z = sum/weight;
+  weight = fp32_div(1.0f, weight);
+  pixel.z = sum * weight;
 
   pixel = all(isfinite(pixel.xyz)) ? pixel : (float4)0.0f;
   write_ipixel(out, (int2)(x, y), pixel);
@@ -3146,8 +3152,9 @@ ashift_lanczos2(read_only image2d_t in,
     weight += w;
   }
 
+  weight = fp32_div(1.0f, weight);
   pixel = (tx >= -1 && ty >= -1 && tx < iwidth && ty < iheight)
-        ? pixel/weight
+        ? pixel * weight
         : (float4)0.0f;
 
   write_ipixel(out, (int2)(x, y), pixel);
@@ -3223,8 +3230,10 @@ ashift_lanczos3(read_only image2d_t in,
       weight += w;
     }
   }
+
+  weight = fp32_div(1.0f, weight);
   pixel = (tx >= -1 && ty >= -1 && tx < iwidth && ty < iheight)
-          ? pixel/weight
+          ? pixel * weight
           : (float4)0.0f;
 
   write_ipixel(out, (int2)(x, y), pixel);
@@ -3495,7 +3504,7 @@ monochrome(read_only image2d_t in,
   float filter  = dt_fast_expf(-clipf((fsquare(pixel.y - a) + fsquare(pixel.z - b)) / (2.0f * size)));
   float tt = envelope(pixel.x);
   float t  = tt + (1.0f-tt)*(1.0f-highlights);
-  pixel.x = mix(pixel.x, pixel.x*basep.x/100.0f, t);
+  pixel.x = dt_mix(pixel.x, pixel.x*basep.x/100.0f, t);
   pixel.y = pixel.z = 0.0f;
   write_imagef (out, (int2)(x, y), pixel);
 }
@@ -3512,12 +3521,11 @@ colorout_out_of_gamut(const float rgb[3],
   float scale[3] = { gamut_scale.x, gamut_scale.y, gamut_scale.z };
   if(hdr_transfer == DT_HDR_PQ)
   {
-    for(int c = 0; c < 3; c++) scale[c] = DT_HDR_REFERENCE_WHITE_NITS / DT_HDR_PQ_PEAK_NITS;
+    for(int c = 0; c < 3; c++) scale[c] = DT_HDR_PQ_WHITE_SCALE;
   }
   else if(hdr_transfer != DT_HDR_NONE)
   {
-    const float positive[3] = { fmax(rgb[0], 0.0f), fmax(rgb[1], 0.0f), fmax(rgb[2], 0.0f) };
-    const float hlg = dt_hdr_hlg_scene_scale(dt_hdr_hlg_luminance(positive, hdr_transfer));
+    const float hlg = dt_hdr_hlg_scene_scale(fabs(dt_hdr_hlg_luminance(rgb, hdr_transfer)));
     for(int c = 0; c < 3; c++) scale[c] = hlg;
   }
   const float below = -tolerance * fmax(fmax(fmax(rgb[0], rgb[1]), rgb[2]), 0.0f) - black;
